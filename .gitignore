@@ -1,0 +1,14 @@
+# Secrets des clients — ne JAMAIS committer
+clients/*/.env
+clients/*/COOLIFY-ENV.txt
+clients/*/backups-local/
+
+# Les dépôts clients sont des dépôts git autonomes :
+# on ne veut pas les embarquer dans l'historique d'odoo-stack.
+clients/*/
+
+# Divers
+*.log
+.DS_Store
+__pycache__/
+*.py[cod]
