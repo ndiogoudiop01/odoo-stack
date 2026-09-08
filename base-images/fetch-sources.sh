@@ -38,36 +38,64 @@ TOKEN="$(cat /run/secrets/gh_token 2>/dev/null || true)"
 
 [ -n "${TOKEN}" ] || log "aucun token fourni : clone anonyme (dépôts publics uniquement)"
 
-# URL de clone, avec ou sans token
+# URL de clone. mode = "token" ou "anon".
 repo_url() {
-  if [ -n "${TOKEN}" ]; then
+  if [ "${2:-token}" = "token" ] && [ -n "${TOKEN}" ]; then
     printf 'https://x-access-token:%s@github.com/%s/%s.git' "${TOKEN}" "${GITHUB_OWNER}" "$1"
   else
     printf 'https://github.com/%s/%s.git' "${GITHUB_OWNER}" "$1"
   fi
 }
 
+LAST_ERR=""
+
 if [ "${GIT_DEPTH}" = "0" ]; then DEPTH=""; else DEPTH="--depth ${GIT_DEPTH}"; fi
 
 # --------------------------------------------------------------------- clone
+mask() { sed "s|${TOKEN:-@@nope@@}|***|g"; }
+
+# Tente le clone avec le token puis, si le token est refusé, SANS token.
+# Un dépôt PUBLIC est en effet rejeté (403) quand on présente un token qui n'a
+# pas de droits dessus : l'anonyme réussit là où l'authentifié échoue.
 clone_repo() {
   repo="$1"; dest="$2"; branch="$3"
   rm -rf "${dest}"          # jamais de clone dans un dossier déjà peuplé
-  log "clone ${GITHUB_OWNER}/${repo} (branche ${branch})"
-  # shellcheck disable=SC2086
-  if git clone ${DEPTH} --branch "${branch}" --single-branch "$(repo_url "${repo}")" "${dest}" 2>/tmp/git.err; then
-    return 0
-  fi
-  log "----- sortie de git -----"
-  sed "s|${TOKEN:-@@nope@@}|***|g" /tmp/git.err >&2 || true
-  log "-------------------------"
+
+  for mode in token anon; do
+    [ "${mode}" = "token" ] && [ -z "${TOKEN}" ] && continue
+    [ "${mode}" = "anon" ]  && [ -n "${TOKEN}" ] && log "nouvelle tentative SANS token (dépôt public ?)"
+    log "clone ${GITHUB_OWNER}/${repo} (branche ${branch}, ${mode})"
+    rm -rf "${dest}"
+    # shellcheck disable=SC2086
+    if git clone ${DEPTH} --branch "${branch}" --single-branch \
+         "$(repo_url "${repo}" "${mode}")" "${dest}" 2>/tmp/git.err; then
+      [ "${mode}" = "anon" ] && [ -n "${TOKEN}" ] \
+        && log "OK en anonyme : ce dépôt est public, le token n'est pas requis"
+      return 0
+    fi
+    log "----- sortie de git (${mode}) -----"
+    mask < /tmp/git.err >&2 || true
+    log "-----------------------------------"
+    LAST_ERR="$(cat /tmp/git.err)"
+  done
+
   log "branches disponibles sur ${GITHUB_OWNER}/${repo} :"
-  if git ls-remote --heads "$(repo_url "${repo}")" 2>/dev/null | sed 's|.*refs/heads/|  - |' >&2; then :; else
-    log "  (impossible de lister : dépôt inexistant, privé sans droits, ou token invalide)"
-  fi
-  fail "clone impossible : ${GITHUB_OWNER}/${repo}, branche ${branch}.
-         Causes possibles : nom de dépôt erroné (attention à enterprise / entreprise),
-         branche absente (voir la liste ci-dessus), ou token sans accès à ce dépôt."
+  { git ls-remote --heads "$(repo_url "${repo}" token)" 2>/dev/null \
+    || git ls-remote --heads "$(repo_url "${repo}" anon)"  2>/dev/null; } \
+    | sed 's|.*refs/heads/|  - |' >&2 \
+    || log "  (dépôt inexistant, privé sans droits, ou token invalide)"
+
+  case "${LAST_ERR}" in
+    *"Write access to repository not granted"*|*"403"*)
+      fail "GitHub renvoie 403 pour ${GITHUB_OWNER}/${repo}.
+         Le token est valide mais n'a AUCUN droit sur ce dépôt précis.
+           · dépôt PUBLIC  -> videz GITHUB_TOKEN dans base-images/base.env
+           · dépôt PRIVÉ   -> le PAT fine-grained doit lister ce dépôt dans
+             « Repository access » avec la permission « Contents: Read-only »" ;;
+    *)
+      fail "clone impossible : ${GITHUB_OWNER}/${repo}, branche ${branch}.
+         Vérifiez le nom du dépôt, la branche (liste ci-dessus) et les droits du token." ;;
+  esac
 }
 
 # Affiche l'arborescence utile pour diagnostiquer une détection ratée

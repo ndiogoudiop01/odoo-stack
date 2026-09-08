@@ -22,6 +22,7 @@
 #      --enterprise-branch <br.> idem pour le dépôt Enterprise
 #      --probe                   ne construit rien : affiche l'arborescence des
 #                                dépôts pour diagnostiquer une détection ratée
+#      --anonymous               ignore le token (dépôts publics)
 #
 #  Configuration : base-images/base.env  (créé au premier lancement)
 ###############################################################################
@@ -38,33 +39,56 @@ CONF="${BASE_DIR}/base.env"
 if [ ! -f "${CONF}" ]; then
   warn "première utilisation : création de ${CONF}"
   cat > "${CONF}" <<'EOF'
-# ---------------------------------------------------------------------------
-#  Configuration des images de base Odoo. Fichier NON commité.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+#  Configuration des images de base Odoo.  Fichier NON commité (token dedans).
+#
+#  Comment remplir chaque variable : prenez l'URL GitHub de votre dépôt.
+#
+#      https://github.com/ndiogoudiop01/odoo/tree/18.0/18.0
+#                         └────┬─────┘ └─┬─┘      └─┬┘ └┬┘
+#                        GITHUB_OWNER  ODOO_REPO  branche  dossier
+#
+#  · GITHUB_OWNER = le compte ou l'organisation  -> ndiogoudiop01
+#  · ODOO_REPO    = le NOM du dépôt uniquement   -> odoo
+#                   (pas l'URL, pas de .git, pas de owner/)
+#  · la branche vient du numéro de version passé à build.sh (18.0 -> branche 18.0).
+#    Si elle diffère :   ./base-images/build.sh 18.0 community --odoo-branch main
+#  · le dossier (18.0 ici) est DÉTECTÉ AUTOMATIQUEMENT : rien à saisir.
+# ===========================================================================
 
-# Compte ou organisation GitHub qui héberge tes dépôts privés
-GITHUB_OWNER=odooAfia
+# Compte ou organisation GitHub qui héberge vos dépôts
+GITHUB_OWNER=ndiogoudiop01
 
-# Noms EXACTS des dépôts GitHub (attention à l'orthographe : entreprise/enterprise)
+# Dépôt contenant les sources du CORE (Community)
+#   exemple : https://github.com/ndiogoudiop01/odoo  ->  ODOO_REPO=odoo
 ODOO_REPO=odoo
+
+# Dépôt contenant les modules ENTERPRISE (ignoré en édition community)
+#   attention à l'orthographe : « entreprise » (fr) et « enterprise » (en)
+#   sont deux dépôts différents pour GitHub.
 ENTERPRISE_REPO=entreprise
 
-# Registre de destination des images de base
-#   GitHub Container Registry : ghcr.io/<owner>
-#   Docker Hub privé          : docker.io/<compte>
+# Registre où publier les images de base
+#   GitHub Container Registry : ghcr.io/<owner en minuscules>
+#   Docker Hub                : docker.io/<compte>
 #   Registre auto-hébergé     : registry.mondomaine.sn
-REGISTRY=ghcr.io/odooafia
+REGISTRY=ghcr.io/ndiogoudiop01
 IMAGE_NAME=odoo
 
-# Token GitHub (fine-grained PAT) avec « Contents: Read » sur les deux dépôts.
-# Sert au clone pendant le build ET au login sur ghcr.io.
+# Token GitHub.
+#   · Dépôts PUBLICS  -> LAISSEZ VIDE. Un token sans droits sur le dépôt
+#     provoque un 403 « Write access to repository not granted ».
+#   · Dépôts PRIVÉS   -> PAT fine-grained avec, pour CHAQUE dépôt listé
+#     ci-dessus : Repository access + permission « Contents: Read-only ».
+#   Pour publier sur ghcr.io, le token doit aussi avoir « write:packages ».
 GITHUB_TOKEN=
 
-# Profondeur du clone : 1 = rapide et léger. Mettre 0 pour l'historique complet.
+# Profondeur du clone : 1 = rapide et léger. 0 = historique complet.
 GIT_DEPTH=1
 EOF
   chmod 600 "${CONF}"
-  err "Complétez ${CONF} (GITHUB_OWNER, REGISTRY, GITHUB_TOKEN) puis relancez."
+  err "Complétez ${CONF} (GITHUB_OWNER, ODOO_REPO, REGISTRY) puis relancez."
+  info "Puis vérifiez avant de construire :  ./base-images/build.sh <version> <édition> --probe"
   exit 1
 fi
 
@@ -99,6 +123,7 @@ while [ "$#" -gt 0 ]; do
     --odoo-branch)       ODOO_BRANCH_OPT="$2"; shift 2 ;;
     --enterprise-branch) ENTERPRISE_BRANCH_OPT="$2"; shift 2 ;;
     --probe)    PROBE=1; shift ;;
+    --anonymous) GITHUB_TOKEN=""; shift ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -165,7 +190,7 @@ build_one() {
 
 # ------------------------------------------------------------------- probe
 repo_url() {
-  if [ -n "${GITHUB_TOKEN}" ]; then
+  if [ "${2:-token}" = "token" ] && [ -n "${GITHUB_TOKEN}" ]; then
     printf 'https://x-access-token:%s@github.com/%s/%s.git' "${GITHUB_TOKEN}" "${GITHUB_OWNER}" "$1"
   else
     printf 'https://github.com/%s/%s.git' "${GITHUB_OWNER}" "$1"
@@ -178,19 +203,38 @@ probe_repo() {
   printf "\n${C_BOLD}%s${C_OFF} — dépôt ${C_BLU}%s/%s${C_OFF}, branche ${C_BLU}%s${C_OFF}\n" \
          "${kind}" "${GITHUB_OWNER}" "${repo}" "${branch}"
 
-  # 1. le dépôt est-il joignable ?
-  if ! git ls-remote --heads "$(repo_url "${repo}")" >/tmp/heads.txt 2>/tmp/lsr.err; then
-    err "dépôt injoignable"
-    printf "  sortie de git :\n"; mask < /tmp/lsr.err | sed 's/^/    /'
-    cat <<EOF
+  # 1. le dépôt est-il joignable ? (avec token, puis en anonyme)
+  local mode="" auth_err=""
+  if [ -n "${GITHUB_TOKEN}" ] \
+     && git ls-remote --heads "$(repo_url "${repo}" token)" >/tmp/heads.txt 2>/tmp/lsr.err; then
+    mode="token"; ok "dépôt joignable (avec le token)"
+  else
+    [ -n "${GITHUB_TOKEN}" ] && auth_err="$(cat /tmp/lsr.err)"
+    if git ls-remote --heads "$(repo_url "${repo}" anon)" >/tmp/heads.txt 2>/tmp/lsr.err; then
+      mode="anon"
+      if [ -n "${GITHUB_TOKEN}" ]; then
+        warn "dépôt joignable SANS token, mais REFUSÉ avec le token :"
+        printf "%s\n" "${auth_err}" | mask | sed 's/^/      /'
+        warn "-> ce dépôt est public : videz GITHUB_TOKEN dans base.env,"
+        warn "   ou donnez au PAT l'accès « Contents: Read-only » sur ${GITHUB_OWNER}/${repo}."
+        warn "   Le build sait retomber tout seul en anonyme, mais autant être explicite."
+      else
+        ok "dépôt joignable (public, sans token)"
+      fi
+    else
+      err "dépôt injoignable"
+      printf "  sortie de git :\n"; mask < /tmp/lsr.err | sed 's/^/    /'
+      cat <<EOF
   Pistes :
     · nom du dépôt exact ? (attention : « entreprise » ≠ « enterprise »)
-    · dépôt privé et token sans accès ? -> le PAT fine-grained doit lister CE dépôt
+    · « Write access ... not granted » / 403 -> le token n'a AUCUN droit sur CE
+      dépôt : videz GITHUB_TOKEN s'il est public, sinon ajoutez le dépôt dans
+      « Repository access » du PAT fine-grained (permission Contents: Read-only)
     · token expiré ou révoqué ?
 EOF
-    return 1
+      return 1
+    fi
   fi
-  ok "dépôt joignable"
 
   # 2. la branche existe-t-elle ?
   printf "  branches disponibles :\n"
@@ -210,7 +254,7 @@ EOF
   dir="${WORK}/$(printf '%s@%s' "${repo}" "${branch}" | tr -c 'A-Za-z0-9._-' '_')"
   rm -rf "${dir}"
   if ! git clone --depth 1 --branch "${branch}" --single-branch \
-        "$(repo_url "${repo}")" "${dir}" >/dev/null 2>/tmp/clone.err; then
+        "$(repo_url "${repo}" "${mode}")" "${dir}" >/dev/null 2>/tmp/clone.err; then
     err "clone échoué"
     printf "  sortie de git :\n"; mask < /tmp/clone.err | sed 's/^/    /'
     printf "  espace disque disponible : %s\n" "$(df -h "${WORK}" | awk 'NR==2 {print $4}')"

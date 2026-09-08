@@ -46,17 +46,60 @@ GitHub → Settings → Developer settings → Personal access tokens → Fine-g
 ./base-images/build.sh 19.0          # crée base-images/base.env puis s'arrête
 ```
 
-Éditez `base-images/base.env` :
+### Comment remplir `base.env` : lire l'URL GitHub
+
+```
+https://github.com/ndiogoudiop01/odoo/tree/18.0/18.0
+                   └────┬─────┘ └─┬─┘      └─┬┘ └┬┘
+                  GITHUB_OWNER  ODOO_REPO  branche  dossier
+```
+
+| Variable | Ce qu'on met | Exemple |
+|---|---|---|
+| `GITHUB_OWNER` | le compte ou l'organisation | `ndiogoudiop01` |
+| `ODOO_REPO` | le **nom du dépôt seul** — pas l'URL, pas de `.git`, pas de `owner/` | `odoo` |
+| `ENTERPRISE_REPO` | idem pour les modules Enterprise (ignoré en `community`) | `entreprise` |
+| `REGISTRY` | destination des images | `ghcr.io/ndiogoudiop01` |
+| `GITHUB_TOKEN` | **vide si les dépôts sont publics** | *(vide)* |
+
+Deux choses ne se mettent **pas** dans `base.env` :
+
+* la **branche** vient du numéro de version passé à `build.sh` (`18.0` → branche
+  `18.0`). Si elle diffère : `--odoo-branch <nom>` ;
+* le **dossier** (`18.0` dans l'URL ci-dessus) est détecté automatiquement.
+
+### Exemple complet — Community 18.0 depuis un dépôt public
 
 ```bash
-GITHUB_OWNER=odooAfia          # compte qui héberge vos dépôts
-ODOO_REPO=odoo                 # nom du dépôt core
-ENTERPRISE_REPO=enterprise     # nom du dépôt enterprise
-REGISTRY=ghcr.io/odooafia      # destination des images
+# base-images/base.env
+GITHUB_OWNER=ndiogoudiop01
+ODOO_REPO=odoo
+ENTERPRISE_REPO=entreprise
+REGISTRY=ghcr.io/ndiogoudiop01
 IMAGE_NAME=odoo
-GITHUB_TOKEN=github_pat_...    # le token de l'étape 1
-GIT_DEPTH=1                    # clone superficiel : rapide et léger
+GITHUB_TOKEN=                 # vide : dépôt public
+GIT_DEPTH=1
 ```
+
+```bash
+./base-images/build.sh 18.0 community --probe    # vérifier
+./base-images/build.sh 18.0 community --push     # construire et publier
+# -> ghcr.io/ndiogoudiop01/odoo:18.0-community
+```
+
+### Token : vide ou renseigné, mais jamais « au cas où »
+
+Sur un dépôt **public**, présenter un token qui n'a aucun droit dessus fait
+**échouer** l'accès avec `403 — Write access to repository not granted`, alors
+que l'anonyme réussirait. Le build sait retomber tout seul en anonyme, mais la
+règle reste :
+
+* dépôts **publics** → `GITHUB_TOKEN=` vide (ou `--anonymous`) ;
+* dépôts **privés** → PAT fine-grained listant **chaque** dépôt dans
+  *Repository access*, permission **Contents: Read-only**.
+
+Le token reste nécessaire pour **publier** sur `ghcr.io` (scope `write:packages`) :
+c'est `docker login`, indépendant du clone.
 
 Ce fichier contient un token : il est déjà dans `.gitignore` et créé en `chmod 600`.
 `make doctor` échoue s'il se retrouve suivi par git.
@@ -279,6 +322,7 @@ lundi à 3h UTC et publie sur GHCR. Copiez-le en
 |---|---|---|
 | `clone impossible` sans détail | ancienne version du script | mettre à jour : la sortie de git et la liste des branches sont désormais affichées |
 | `Repository not found` | nom de dépôt erroné (`entreprise` vs `enterprise`), ou PAT sans accès | corriger `ENTERPRISE_REPO` dans `base.env` ; vérifier *Repository access* du token fine-grained |
+| `403 — Write access to repository not granted` | un token est présenté alors qu'il n'a aucun droit sur ce dépôt | dépôt public → videz `GITHUB_TOKEN` (ou `--anonymous`) ; dépôt privé → ajoutez-le au PAT avec *Contents: Read-only* |
 | `Remote branch 19.0 not found` | la branche n'existe pas dans ce dépôt | `--probe` liste les branches ; utiliser `--odoo-branch` / `--enterprise-branch` |
 | `failed to compute cache key: "/src/odoo/requirements.txt": not found` | ancienne version du Dockerfile | mettre à jour : le build normalise désormais l'arborescence et produit `/src/requirements.txt` |
 | `racine Odoo introuvable (aucun odoo-bin)` | le code est dans un sous-dossier, ou le dépôt n'est pas un fork d'Odoo | `--probe` puis `--odoo-subdir <chemin>` |
