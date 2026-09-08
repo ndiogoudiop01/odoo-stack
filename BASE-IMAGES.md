@@ -1,0 +1,187 @@
+# Images de base Odoo — construites depuis vos dépôts privés
+
+Le code Odoo (core **et** Enterprise) vient de **vos** dépôts GitHub privés, pas
+des dépôts officiels. Il est empaqueté une fois par version dans une **image de
+base**, que tous les clients de cette version réutilisent en `FROM`.
+
+```
+        VOS DÉPÔTS PRIVÉS                    REGISTRE (ghcr.io)
+   ┌──────────────────────────┐        ┌──────────────────────────────┐
+   │ <owner>/odoo             │        │ odoo:19.0-enterprise         │
+   │   branches 17.0/18.0/19.0│  ───▶  │ odoo:18.0-enterprise         │
+   │ <owner>/enterprise       │        │ odoo:17.0-community          │
+   │   branches 17.0/18.0/19.0│        └──────────────┬───────────────┘
+   └──────────────────────────┘                       │  FROM
+                                          ┌───────────┴───────────┐
+                                     clients/lodge          clients/acme
+                                     (+ addons-custom)      (+ addons-custom)
+```
+
+**Pourquoi ce découpage.** Cloner plusieurs Go de sources dans chacun des 20
+dépôts clients coûterait 20 fois le temps et l'espace, et obligerait à donner le
+token GitHub à chaque ressource du PaaS. Ici le clone privé a lieu **une fois par
+version**, et le build d'un client dure ~30 secondes.
+
+---
+
+## 1. Prérequis GitHub
+
+Un **fine-grained personal access token** avec, sur les deux dépôts :
+
+```
+Repository access : <owner>/odoo  et  <owner>/enterprise
+Permissions       : Contents → Read-only
+```
+
+GitHub → Settings → Developer settings → Personal access tokens → Fine-grained.
+
+> Un token *classic* avec le scope `repo` fonctionne aussi, mais il donne accès à
+> tous vos dépôts : préférez le fine-grained.
+
+---
+
+## 2. Configuration (une fois)
+
+```bash
+./base-images/build.sh 19.0          # crée base-images/base.env puis s'arrête
+```
+
+Éditez `base-images/base.env` :
+
+```bash
+GITHUB_OWNER=odooAfia          # compte qui héberge vos dépôts
+ODOO_REPO=odoo                 # nom du dépôt core
+ENTERPRISE_REPO=enterprise     # nom du dépôt enterprise
+REGISTRY=ghcr.io/odooafia      # destination des images
+IMAGE_NAME=odoo
+GITHUB_TOKEN=github_pat_...    # le token de l'étape 1
+GIT_DEPTH=1                    # clone superficiel : rapide et léger
+```
+
+Ce fichier contient un token : il est déjà dans `.gitignore` et créé en `chmod 600`.
+`make doctor` échoue s'il se retrouve suivi par git.
+
+---
+
+## 3. Construire
+
+```bash
+./base-images/build.sh 19.0 enterprise            # build local (test)
+./base-images/build.sh 19.0 enterprise --push     # build + publication
+./base-images/build.sh 18.0 community --push
+./base-images/build.sh all --push                 # 17.0, 18.0, 19.0
+```
+
+Premier build : 10 à 20 minutes (compilation des dépendances Python).
+Builds suivants : 2 à 5 minutes grâce au cache.
+
+Le build échoue volontairement si Odoo ne s'importe pas ou si les addons du core
+sont introuvables — une image cassée ne sort jamais du build.
+
+### Ce que contient l'image
+
+| | |
+|---|---|
+| `/opt/odoo` | votre dépôt core (branche = version) |
+| `/opt/odoo-enterprise` | votre dépôt enterprise (vide en édition community) |
+| `/opt/venv` | dépendances Python (`requirements.txt` d'Odoo + `extra-requirements.txt`) |
+| `/opt/SOURCES.txt` | dépôts, branches et **commits exacts** embarqués |
+| `wkhtmltopdf` | build « patched Qt », indispensable aux rapports PDF |
+| `rtlcss` | rendu des langues RTL (arabe) |
+
+```bash
+docker run --rm --entrypoint cat ghcr.io/odooafia/odoo:19.0-enterprise /opt/SOURCES.txt
+```
+
+Vous saurez toujours quel commit tourne chez un client donné.
+
+### Le token ne finit jamais dans l'image
+
+Il est injecté via `--mount=type=secret` (BuildKit) dans un étage jetable, et les
+dossiers `.git` sont supprimés avant la copie vers l'image finale. À vérifier
+après un build :
+
+```bash
+docker history --no-trunc ghcr.io/odooafia/odoo:19.0-enterprise | grep -i token   # rien
+docker run --rm ghcr.io/odooafia/odoo:19.0-enterprise \
+       sh -c 'ls -a /opt/odoo | grep "^.git$"'                                     # rien
+```
+
+---
+
+## 4. Publier et autoriser le VPS
+
+```bash
+# Poste de développement — publication
+docker login ghcr.io -u odooAfia            # mot de passe = le PAT
+./base-images/build.sh 19.0 enterprise --push
+
+# VPS — autorisation de tirer l'image
+docker login ghcr.io -u odooAfia
+```
+
+Coolify et Dokploy réutilisent le `~/.docker/config.json` du serveur : un seul
+`docker login` suffit pour tous les clients. Vous pouvez aussi déclarer un
+**Registry** dans l'UI de la plateforme.
+
+Sur GHCR, une image publiée est **privée par défaut**. Pour permettre à plusieurs
+serveurs de la tirer sans partager votre PAT : GitHub → Packages → le package →
+*Manage Actions access* / *Package settings*.
+
+---
+
+## 5. Ajouter une dépendance Python à toutes les images
+
+`base-images/extra-requirements.txt` est installé dans **toutes** les images de
+base. Ce qui ne concerne qu'un seul client reste dans
+`clients/<slug>/requirements.txt`.
+
+```bash
+echo "openupgradelib==3.7.0" >> base-images/extra-requirements.txt
+./base-images/build.sh all --push
+```
+
+---
+
+## 6. Mettre à jour un client vers une nouvelle image
+
+```bash
+# 1. reconstruire l'image de base après un push sur votre branche 19.0
+./base-images/build.sh 19.0 enterprise --push
+
+# 2. côté client
+cd clients/lodge
+make backup
+make pull-base        # docker pull de l'image de base
+make rebuild          # reconstruit la couche client et redémarre
+make upgrade M=all    # si des modules ont changé de version
+```
+
+Sur Coolify / Dokploy : **Redeploy** avec l'option *Pull latest images* suffit.
+
+Les images sont aussi taguées avec la date (`19.0-enterprise-20260908`) : pour
+revenir en arrière, pointez `ODOO_BASE_IMAGE` sur un tag daté antérieur et
+redéployez.
+
+---
+
+## 7. Automatiser (GitHub Actions)
+
+`base-images/github-actions.example.yml` reconstruit les trois versions chaque
+lundi à 3h UTC et publie sur GHCR. Copiez-le en
+`.github/workflows/base-images.yml` dans ce dépôt et ajoutez le secret
+`ODOO_SOURCES_TOKEN`.
+
+---
+
+## 8. Problèmes fréquents
+
+| Symptôme | Cause | Solution |
+|---|---|---|
+| `Repository not found` pendant le build | le PAT n'a pas accès aux deux dépôts | vérifier *Repository access* du token fine-grained |
+| `Remote branch 19.0 not found` | la branche n'existe pas dans votre fork | créer la branche, ou passer `--version` sur une branche existante |
+| `no such file: requirements.txt` | dépôt core sans `requirements.txt` à la racine | vérifier que le fork est bien complet |
+| `denied: permission_denied` au push | pas connecté à ghcr.io, ou PAT sans `write:packages` | `docker login ghcr.io` avec un PAT qui a `write:packages` |
+| Le VPS ne peut pas tirer l'image | serveur non authentifié au registre | `docker login ghcr.io` sur le VPS |
+| Build très long | `GIT_DEPTH=0` | repasser à `GIT_DEPTH=1` |
+| `wkhtmltopdf: not found` sur ARM | pas de paquet pour cette architecture | construire avec `--platform linux/amd64`, ou adapter la version dans le Dockerfile |
