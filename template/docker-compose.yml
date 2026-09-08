@@ -73,6 +73,10 @@ services:
       args:
         ODOO_BASE_IMAGE: ${ODOO_BASE_IMAGE:?ODOO_BASE_IMAGE requis (voir docs/BASE-IMAGES.md)}
     image: ${CLIENT_SLUG:-odoo}-odoo:${ODOO_VERSION:-19.0}
+    # Cette image est construite ICI, elle n'existe dans aucun registre :
+    # sans ça, « docker compose up » tente un pull et échoue avec
+    # « pull access denied for <slug>-odoo ».
+    pull_policy: build
     <<: *default-restart
     logging: *default-logging
     depends_on:
