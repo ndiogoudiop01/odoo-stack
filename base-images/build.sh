@@ -204,7 +204,11 @@ EOF
   ok "branche « ${branch} » présente"
 
   # 3. structure
-  local dir="${WORK}/${repo}"
+  # dossier unique par (dépôt, branche) : deux sondes du même dépôt ne peuvent
+  # plus se marcher dessus
+  local dir
+  dir="${WORK}/$(printf '%s@%s' "${repo}" "${branch}" | tr -c 'A-Za-z0-9._-' '_')"
+  rm -rf "${dir}"
   if ! git clone --depth 1 --branch "${branch}" --single-branch \
         "$(repo_url "${repo}")" "${dir}" >/dev/null 2>/tmp/clone.err; then
     err "clone échoué"
@@ -212,6 +216,8 @@ EOF
     printf "  espace disque disponible : %s\n" "$(df -h "${WORK}" | awk 'NR==2 {print $4}')"
     cat <<EOF
   Pistes :
+    · « already exists » -> ODOO_REPO et ENTERPRISE_REPO pointent le même dépôt
+      dans base-images/base.env (voir la configuration affichée plus haut)
     · dépôt volumineux + disque plein -> libérez de la place (docker system prune -af)
     · dépôt utilisant Git LFS -> installez git-lfs, ou déposez les sources sans LFS
     · coupure réseau pendant le transfert -> réessayez
@@ -267,6 +273,23 @@ EOF
 
 if [ "${PROBE}" -eq 1 ]; then
   title "Sondage des dépôts — Odoo ${VERSION} (${EDITION})"
+
+  # Configuration effectivement utilisée : c'est la première chose à vérifier
+  # quand quelque chose ne colle pas.
+  cat <<EOF
+Configuration lue dans base-images/base.env :
+  GITHUB_OWNER      ${GITHUB_OWNER}
+  ODOO_REPO         ${ODOO_REPO}          @ ${ODOO_BRANCH_OPT:-${VERSION}}
+  ENTERPRISE_REPO   ${ENTERPRISE_REPO}    @ ${ENTERPRISE_BRANCH_OPT:-${VERSION}}
+  REGISTRY          ${REGISTRY}/${IMAGE_NAME}
+  GITHUB_TOKEN      $([ -n "${GITHUB_TOKEN}" ] && echo "renseigné (${#GITHUB_TOKEN} caractères)" || echo "absent — clone anonyme")
+EOF
+  if [ "${ODOO_REPO}" = "${ENTERPRISE_REPO}" ]; then
+    warn "ODOO_REPO et ENTERPRISE_REPO désignent le MÊME dépôt (${ODOO_REPO})."
+    warn "C'est valide si ce dépôt contient à la fois le core et les modules"
+    warn "Enterprise dans des sous-dossiers distincts ; sinon corrigez base.env."
+  fi
+
   WORK="$(mktemp -d)"
   trap 'rm -rf "${WORK}"' EXIT
   RC=0

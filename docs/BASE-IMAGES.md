@@ -143,6 +143,18 @@ construire une image `19.0` :
 Quelle que soit la structure d'origine, l'image finale est toujours normalisée :
 `/opt/odoo` (avec `odoo-bin`), `/opt/odoo-enterprise` (les modules).
 
+### Un seul dépôt pour le core ET Enterprise
+
+C'est possible, mais la détection automatique ne peut pas deviner quel
+sous-dossier porte Enterprise (elle tomberait sur les addons du core). Indiquez-le :
+
+```bash
+./base-images/build.sh 19.0 enterprise --enterprise-subdir enterprise-19
+```
+
+Sans cette option, le build s'arrête avec un message explicite plutôt que de
+produire une image incohérente.
+
 ### Dépôts publics
 
 Si vos dépôts sont publics, laissez `GITHUB_TOKEN` vide : le clone se fait en
@@ -275,6 +287,7 @@ lundi à 3h UTC et publie sur GHCR. Copiez-le en
 | `odoo-bin absent` dans la sonde | archive Sources d'odoo.com (normal) ou dépôt Enterprise (normal) | rien à faire : le build génère le lanceur |
 | `module « base » introuvable` | source du core incomplète | vérifier la présence de `odoo/addons/base` dans le dépôt |
 | `clone échoué` après « branche présente » | disque plein, Git LFS, ou coupure réseau | la sonde affiche l'erreur git et l'espace disque ; `docker system prune -af` libère souvent le nécessaire |
+| `destination path … already exists and is not an empty directory` | `ODOO_REPO` et `ENTERPRISE_REPO` pointent le même dépôt | la sonde affiche la configuration lue : corrigez `base.env`, ou passez `--enterprise-subdir` si le dépôt contient réellement les deux |
 | `denied: permission_denied` au push | pas connecté à ghcr.io, ou PAT sans `write:packages` | `docker login ghcr.io` avec un PAT qui a `write:packages` |
 | Le VPS ne peut pas tirer l'image | serveur non authentifié au registre | `docker login ghcr.io` sur le VPS |
 | Build très long | `GIT_DEPTH=0` | repasser à `GIT_DEPTH=1` |

@@ -52,6 +52,7 @@ if [ "${GIT_DEPTH}" = "0" ]; then DEPTH=""; else DEPTH="--depth ${GIT_DEPTH}"; f
 # --------------------------------------------------------------------- clone
 clone_repo() {
   repo="$1"; dest="$2"; branch="$3"
+  rm -rf "${dest}"          # jamais de clone dans un dossier déjà peuplé
   log "clone ${GITHUB_OWNER}/${repo} (branche ${branch})"
   # shellcheck disable=SC2086
   if git clone ${DEPTH} --branch "${branch}" --single-branch "$(repo_url "${repo}")" "${dest}" 2>/tmp/git.err; then
@@ -131,7 +132,21 @@ log "racine Odoo détectée : ${ODOO_REL:-<racine du dépôt>}"
 # --- Enterprise ---------------------------------------------------------------
 ENT_REL="-"
 if [ "${EDITION}" = "enterprise" ]; then
-  clone_repo "${ENTERPRISE_REPO}" /tmp/raw-enterprise "${ENTERPRISE_BRANCH}"
+  if [ "${ENTERPRISE_REPO}" = "${ODOO_REPO}" ] && [ "${ENTERPRISE_BRANCH}" = "${ODOO_BRANCH}" ]; then
+    # Même dépôt : impossible de deviner quel sous-dossier porte Enterprise,
+    # la détection tomberait sur les addons du core. On l'exige explicitement.
+    [ -n "${ENTERPRISE_SUBDIR}" ] || fail "ODOO_REPO et ENTERPRISE_REPO désignent le même dépôt
+         (${ODOO_REPO}@${ODOO_BRANCH}). Deux cas :
+           · c'est une erreur de configuration -> corrigez base-images/base.env
+           · le dépôt contient bien les deux -> indiquez où sont les modules
+             Enterprise :  --enterprise-subdir <chemin>"
+    # Un seul dépôt contient le core ET Enterprise : on réutilise le clone
+    # au lieu de le refaire (et surtout au lieu d'échouer sur un dossier occupé).
+    log "core et Enterprise dans le même dépôt/branche : réutilisation du clone"
+    cp -a /tmp/raw-odoo /tmp/raw-enterprise
+  else
+    clone_repo "${ENTERPRISE_REPO}" /tmp/raw-enterprise "${ENTERPRISE_BRANCH}"
+  fi
   ENT_ROOT="$(detect_enterprise_root /tmp/raw-enterprise || true)"
   if [ -z "${ENT_ROOT}" ]; then
     show_tree /tmp/raw-enterprise
