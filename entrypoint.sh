@@ -39,36 +39,46 @@ log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
 # --- addons_path -------------------------------------------------------------
 # Ordre : enterprise > core > OCA > custom  (le dernier gagne en cas d'homonyme).
-# Les chemins du core et d'enterprise viennent de l'image de base
-# (ODOO_CORE_ADDONS / ODOO_ENTERPRISE_ADDONS) ; les valeurs par défaut ci-dessous
-# couvrent aussi l'image officielle Odoo, au cas où.
-: "${ODOO_CORE_ADDONS:=}"
+#
+# Le core peut exposer SES addons à deux endroits selon la provenance :
+#   odoo/addons/  -> le module « base » (clone git comme archive Sources)
+#   addons/       -> les modules standard
+# On prend tous ceux qui contiennent réellement des modules.
+: "${ODOO_HOME:=/opt/odoo}"
 : "${ODOO_ENTERPRISE_ADDONS:=/opt/odoo-enterprise}"
-
-if [ -z "${ODOO_CORE_ADDONS}" ]; then
-  for candidate in /opt/odoo/addons /usr/lib/python3/dist-packages/odoo/addons; do
-    [ -d "${candidate}/base" ] && { ODOO_CORE_ADDONS="${candidate}"; break; }
-  done
-fi
-has_content() { [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null | grep -v '^\.gitkeep$')" ]; }
 
 # un dossier « d'addons » contient directement des modules (*/__manifest__.py)
 holds_modules() { compgen -G "$1/*/__manifest__.py" >/dev/null 2>&1; }
+has_content()   { [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null | grep -v '^\.gitkeep$')" ]; }
 
-if [ -z "${ODOO_CORE_ADDONS}" ] || [ ! -d "${ODOO_CORE_ADDONS}/base" ]; then
-  log "ERREUR : addons core Odoo introuvables (ODOO_CORE_ADDONS=${ODOO_CORE_ADDONS:-<vide>})"
+CORE_HINT="${ODOO_CORE_ADDONS:-}"
+CORE_DIRS=()
+for candidate in ${CORE_HINT//,/ } \
+                 "${ODOO_HOME}/addons" \
+                 "${ODOO_HOME}/odoo/addons" \
+                 /usr/lib/python3/dist-packages/odoo/addons; do
+  [ -n "${candidate}" ] || continue
+  # chemin relatif hérité de l'image de base -> le rendre absolu
+  case "${candidate}" in /*) ;; *) candidate="${ODOO_HOME}/${candidate}" ;; esac
+  # dédoublonnage
+  skip=0
+  for already in "${CORE_DIRS[@]-}"; do [ "${already}" = "${candidate}" ] && skip=1; done
+  [ "${skip}" -eq 1 ] && continue
+  holds_modules "${candidate}" && CORE_DIRS+=("${candidate}")
+done
+
+if [ "${#CORE_DIRS[@]}" -eq 0 ]; then
+  log "ERREUR : aucun dossier d'addons du core trouvé sous ${ODOO_HOME}"
   log "         l'image de base est-elle correcte ? voir docs/BASE-IMAGES.md"
   exit 1
 fi
 
 ADDONS_DIRS=()
 has_content "${ODOO_ENTERPRISE_ADDONS}" && ADDONS_DIRS+=("${ODOO_ENTERPRISE_ADDONS}")
-ADDONS_DIRS+=("${ODOO_CORE_ADDONS}")
+ADDONS_DIRS+=("${CORE_DIRS[@]}")
 
 # addons-oca/ contient soit des modules à plat, soit un dossier par dépôt OCA.
-if holds_modules /mnt/addons-oca; then
-  ADDONS_DIRS+=("/mnt/addons-oca")
-fi
+holds_modules /mnt/addons-oca && ADDONS_DIRS+=("/mnt/addons-oca")
 if [ -d /mnt/addons-oca ]; then
   for repo in /mnt/addons-oca/*/; do
     [ -d "${repo}" ] || continue
