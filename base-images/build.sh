@@ -75,13 +75,25 @@ ENTERPRISE_REPO=entreprise
 REGISTRY=ghcr.io/ndiogoudiop01
 IMAGE_NAME=odoo
 
-# Token GitHub.
+# ---------------------------------------------------------------------------
+#  DEUX tokens différents, pour deux usages différents. Ne les confondez pas.
+# ---------------------------------------------------------------------------
+
+# 1) LIRE LES SOURCES (git clone)
 #   · Dépôts PUBLICS  -> LAISSEZ VIDE. Un token sans droits sur le dépôt
 #     provoque un 403 « Write access to repository not granted ».
-#   · Dépôts PRIVÉS   -> PAT fine-grained avec, pour CHAQUE dépôt listé
+#   · Dépôts PRIVÉS   -> PAT *fine-grained* avec, pour CHAQUE dépôt listé
 #     ci-dessus : Repository access + permission « Contents: Read-only ».
-#   Pour publier sur ghcr.io, le token doit aussi avoir « write:packages ».
 GITHUB_TOKEN=
+
+# 2) PUBLIER LES IMAGES (docker push vers le registre)
+#   ghcr.io n'accepte QUE les PAT *classic* : un fine-grained est rejeté avec
+#   « denied: permission_denied: The token provided does not match expected scopes ».
+#   Créez un PAT classic (Settings > Developer settings > Personal access tokens
+#   > Tokens (classic)) avec les scopes : write:packages + read:packages.
+#   Laissez vide si vous ne publiez pas (build local uniquement).
+REGISTRY_USER=ndiogoudiop01
+REGISTRY_TOKEN=
 
 # Profondeur du clone : 1 = rapide et léger. 0 = historique complet.
 GIT_DEPTH=1
@@ -99,6 +111,8 @@ set -a; source "${CONF}"; set +a
 : "${REGISTRY:?REGISTRY manquant dans base.env}"
 : "${GITHUB_TOKEN:=}"
 [ -n "${GITHUB_TOKEN}" ] || warn "GITHUB_TOKEN vide : clone anonyme (ne marche que sur des dépôts publics)"
+REGISTRY_USER="${REGISTRY_USER:-${GITHUB_OWNER}}"
+REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
 ODOO_REPO="${ODOO_REPO:-odoo}"
 ENTERPRISE_REPO="${ENTERPRISE_REPO:-enterprise}"
 IMAGE_NAME="${IMAGE_NAME:-odoo}"
@@ -177,7 +191,28 @@ build_one() {
   if [ "${PUSH}" -eq 1 ]; then args+=(--push); else args+=(--load); fi
   args+=("${BASE_DIR}")
 
-  DOCKER_BUILDKIT=1 GITHUB_TOKEN="${GITHUB_TOKEN}" docker "${args[@]}"
+  local rc=0
+  DOCKER_BUILDKIT=1 GITHUB_TOKEN="${GITHUB_TOKEN}" docker "${args[@]}" 2>&1 \
+    | tee /tmp/build.log || rc=$?
+
+  if [ "${rc}" -ne 0 ]; then
+    if grep -qi 'does not match expected scopes\|permission_denied\|denied: ' /tmp/build.log; then
+      err "image construite, mais publication refusée par ${REGISTRY%%/*}"
+      cat <<EOF
+
+  Sur ghcr.io, ce message vient presque toujours du type de token :
+    · REGISTRY_TOKEN doit être un PAT **classic**, pas un fine-grained
+      https://github.com/settings/tokens -> « Generate new token (classic) »
+    · scopes requis : write:packages + read:packages
+    · REGISTRY_USER doit être le compte propriétaire du token
+
+  Vérification manuelle :
+      echo \$TOKEN | docker login ghcr.io -u ${REGISTRY_USER} --password-stdin
+      docker push ${tag}
+EOF
+    fi
+    return "${rc}"
+  fi
 
   ok "construit : ${tag}"
   if [ "${PUSH}" -eq 1 ]; then
@@ -352,24 +387,69 @@ EOF
 fi
 
 # --------------------------------------------------------------- login registre
+#  Fait AVANT le build : inutile d'attendre 15 minutes pour découvrir au push
+#  que le token n'a pas les bons droits.
 if [ "${PUSH}" -eq 1 ]; then
-  case "${REGISTRY}" in
-    ghcr.io/*)
-      info "connexion à ghcr.io…"
-      printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_OWNER}" --password-stdin
-      ;;
-    *) warn "vérifiez que vous êtes connecté à ${REGISTRY} (docker login)" ;;
+  REGISTRY_HOST="${REGISTRY%%/*}"
+  REGISTRY_NS="${REGISTRY#*/}"
+
+  # Le token de publication est distinct de celui du clone. Repli sur
+  # GITHUB_TOKEN pour rester compatible avec les anciens base.env.
+  PUSH_TOKEN="${REGISTRY_TOKEN:-${GITHUB_TOKEN}}"
+
+  if [ -z "${PUSH_TOKEN}" ]; then
+    err "publication demandée (--push) mais aucun token de registre."
+    cat <<EOF
+
+  Renseignez REGISTRY_TOKEN dans base-images/base.env.
+
+  Pour ghcr.io il faut un PAT **classic** (les fine-grained sont refusés) :
+    1. https://github.com/settings/tokens  ->  « Generate new token (classic) »
+    2. Scopes à cocher :  write:packages  et  read:packages
+    3. Copiez le token dans base.env :
+         REGISTRY_USER=${GITHUB_OWNER}
+         REGISTRY_TOKEN=ghp_xxxxxxxxxxxx
+
+  Ou construisez sans publier (image locale) : retirez --push.
+EOF
+    exit 1
+  fi
+
+  # Le namespace ghcr.io doit être en minuscules
+  case "${REGISTRY_NS}" in
+    *[A-Z]*)
+      err "le namespace du registre doit être en minuscules : ${REGISTRY_NS}"
+      info "corrigez REGISTRY dans base.env -> ${REGISTRY_HOST}/$(printf '%s' "${REGISTRY_NS}" | tr '[:upper:]' '[:lower:]')"
+      exit 1 ;;
   esac
+
+  info "connexion à ${REGISTRY_HOST} en tant que ${REGISTRY_USER}…"
+  if printf '%s' "${PUSH_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin 2>/tmp/login.err; then
+    ok "authentifié sur ${REGISTRY_HOST}"
+  else
+    err "échec de connexion à ${REGISTRY_HOST}"
+    sed 's/^/    /' /tmp/login.err
+    cat <<EOF
+
+  Causes fréquentes sur ghcr.io :
+    · token fine-grained -> non supporté, utilisez un PAT **classic**
+    · scope write:packages manquant
+    · REGISTRY_USER (${REGISTRY_USER}) différent du compte propriétaire du token
+EOF
+    exit 1
+  fi
 fi
 
 # -------------------------------------------------------------------- exécution
+BUILD_RC=0
 if [ "${VERSION}" = "all" ]; then
   for v in 17.0 18.0 19.0; do
-    build_one "${v}" "${EDITION}"
+    build_one "${v}" "${EDITION}" || BUILD_RC=1
   done
 else
-  build_one "${VERSION}" "${EDITION}"
+  build_one "${VERSION}" "${EDITION}" || BUILD_RC=1
 fi
+[ "${BUILD_RC}" -eq 0 ] || { err "au moins un build a échoué"; exit 1; }
 
 printf "\n"
 ok "terminé"

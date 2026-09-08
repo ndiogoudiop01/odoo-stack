@@ -24,19 +24,15 @@ version**, et le build d'un client dure ~30 secondes.
 
 ---
 
-## 1. Prérequis GitHub
+## 1. Prérequis
 
-Un **fine-grained personal access token** avec, sur les deux dépôts :
+* `git`, `docker` ≥ 23 avec `buildx`
+* un compte GitHub hébergeant vos sources Odoo
+* **pour publier les images** : un PAT *classic* avec `write:packages`
+* **pour lire des dépôts privés** : un PAT *fine-grained* avec `Contents: Read-only`
 
-```
-Repository access : <owner>/odoo  et  <owner>/enterprise
-Permissions       : Contents → Read-only
-```
-
-GitHub → Settings → Developer settings → Personal access tokens → Fine-grained.
-
-> Un token *classic* avec le scope `repo` fonctionne aussi, mais il donne accès à
-> tous vos dépôts : préférez le fine-grained.
+La création pas à pas des deux tokens est en **[§5](#5-les-deux-tokens-github--et-comment-les-créer)** :
+ils ne sont pas du même type et ne sont pas interchangeables.
 
 ---
 
@@ -251,24 +247,102 @@ docker run --rm ghcr.io/odooafia/odoo:19.0-enterprise \
 
 ---
 
-## 5. Publier et autoriser le VPS
+## 5. Les deux tokens GitHub — et comment les créer
+
+C'est la source d'erreur numéro un. **Deux usages, deux tokens de types
+différents**, qui ne sont pas interchangeables :
+
+| Usage | Type de token | Droits | Variable |
+|---|---|---|---|
+| `git clone` de vos sources | **fine-grained** | `Contents: Read-only` sur chaque dépôt | `GITHUB_TOKEN` |
+| `docker push` vers ghcr.io | **classic** | `write:packages`, `read:packages` | `REGISTRY_TOKEN` |
+
+> **ghcr.io n'accepte pas les tokens fine-grained.** Un fine-grained est rejeté au
+> push avec `denied: permission_denied: The token provided does not match
+> expected scopes`. Ce n'est pas un problème de scope à ajuster : il faut un PAT
+> *classic*.
+
+### A. Token de publication (obligatoire pour `--push`)
+
+1. https://github.com/settings/tokens → **Generate new token (classic)**
+2. *Note* : `ghcr-odoo-stack` · *Expiration* : 90 jours ou plus
+3. Cochez uniquement :
+   * ✅ `write:packages`
+   * ✅ `read:packages`
+   *(`repo` n'est nécessaire que si vous voulez aussi lire des dépôts privés
+   avec ce même token)*
+4. **Generate token**, copiez la valeur `ghp_…` (elle ne sera plus affichée)
+5. Dans `base-images/base.env` :
 
 ```bash
-# Poste de développement — publication
-docker login ghcr.io -u odooAfia            # mot de passe = le PAT
-./base-images/build.sh 19.0 enterprise --push
-
-# VPS — autorisation de tirer l'image
-docker login ghcr.io -u odooAfia
+REGISTRY_USER=ndiogoudiop01
+REGISTRY_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-Coolify et Dokploy réutilisent le `~/.docker/config.json` du serveur : un seul
-`docker login` suffit pour tous les clients. Vous pouvez aussi déclarer un
-**Registry** dans l'UI de la plateforme.
+Le script se connecte au registre **avant** de construire : une erreur de droits
+apparaît en 5 secondes, pas après 15 minutes de build.
 
-Sur GHCR, une image publiée est **privée par défaut**. Pour permettre à plusieurs
-serveurs de la tirer sans partager votre PAT : GitHub → Packages → le package →
-*Manage Actions access* / *Package settings*.
+### B. Token de lecture des sources privées
+
+Nécessaire seulement si vos dépôts Odoo sont **privés** (laissez `GITHUB_TOKEN`
+vide s'ils sont publics — un token sans droits ferait échouer un dépôt public) :
+
+1. https://github.com/settings/tokens?type=beta → **Generate new token**
+2. *Repository access* → **Only select repositories** → cochez
+   `ndiogoudiop01/odoo` **et** `ndiogoudiop01/entreprise`
+3. *Repository permissions* → **Contents** → **Read-only**
+   *(laissez tout le reste sur « No access »)*
+4. **Generate token**, copiez `github_pat_…`
+5. Dans `base.env` : `GITHUB_TOKEN=github_pat_…`
+
+> Un dépôt oublié dans « Only select repositories » donne
+> `403 — Write access to repository not granted` sur ce dépôt précis, même si
+> les autres passent.
+
+### C. Publier et autoriser le VPS
+
+```bash
+./base-images/build.sh 18.0 community --push
+```
+
+Sur GHCR, un package publié est **privé par défaut**. Pour que le VPS puisse le
+tirer, deux options :
+
+**Option 1 — authentifier le serveur** (recommandé pour du code Enterprise)
+
+```bash
+# sur le VPS
+echo ghp_xxxx | docker login ghcr.io -u ndiogoudiop01 --password-stdin
+```
+
+Un `read:packages` suffit côté serveur : créez un second PAT classic avec ce
+seul scope plutôt que d'y copier celui qui sait publier.
+
+Coolify et Dokploy réutilisent le `~/.docker/config.json` du serveur — un seul
+login couvre tous les clients. Vous pouvez aussi déclarer le registre dans leur
+interface (*Keys & Tokens → Docker Registries* sur Coolify, *Registry* sur
+Dokploy).
+
+**Option 2 — rendre le package public** (acceptable pour du Community pur)
+
+GitHub → votre profil → **Packages** → `odoo` → *Package settings* →
+**Change visibility** → Public. Plus aucun login nécessaire sur le VPS.
+
+> Ne rendez **jamais** public un package contenant du code Enterprise : votre
+> licence Odoo ne le permet pas.
+
+### D. Se passer complètement de registre
+
+Si vous n'avez qu'un seul VPS, construisez l'image **sur** le VPS et sautez le
+push :
+
+```bash
+./base-images/build.sh 18.0 community        # sans --push : image locale
+```
+
+L'image reste dans le démon Docker du serveur, et les clients la trouvent en
+`FROM`. Vous perdez le partage entre plusieurs serveurs et le retour arrière par
+tag daté ; c'est le compromis raisonnable pour un parc mono-serveur.
 
 ---
 
@@ -332,7 +406,8 @@ lundi à 3h UTC et publie sur GHCR. Copiez-le en
 | `module « base » introuvable` | source du core incomplète | vérifier la présence de `odoo/addons/base` dans le dépôt |
 | `clone échoué` après « branche présente » | disque plein, Git LFS, ou coupure réseau | la sonde affiche l'erreur git et l'espace disque ; `docker system prune -af` libère souvent le nécessaire |
 | `destination path … already exists and is not an empty directory` | `ODOO_REPO` et `ENTERPRISE_REPO` pointent le même dépôt | la sonde affiche la configuration lue : corrigez `base.env`, ou passez `--enterprise-subdir` si le dépôt contient réellement les deux |
-| `denied: permission_denied` au push | pas connecté à ghcr.io, ou PAT sans `write:packages` | `docker login ghcr.io` avec un PAT qui a `write:packages` |
+| `denied: permission_denied: The token provided does not match expected scopes` | token **fine-grained** utilisé pour ghcr.io | créez un PAT **classic** avec `write:packages` et mettez-le dans `REGISTRY_TOKEN` (§5.A) |
+| `unauthorized` au push | `REGISTRY_USER` ≠ propriétaire du token, ou namespace en majuscules | aligner `REGISTRY_USER` ; `REGISTRY` doit être en minuscules |
 | Le VPS ne peut pas tirer l'image | serveur non authentifié au registre | `docker login ghcr.io` sur le VPS |
 | Build très long | `GIT_DEPTH=0` | repasser à `GIT_DEPTH=1` |
 | `wkhtmltopdf: not found` sur ARM | pas de paquet pour cette architecture | construire avec `--platform linux/amd64`, ou adapter la version dans le Dockerfile |
