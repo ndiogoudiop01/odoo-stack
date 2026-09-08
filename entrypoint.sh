@@ -37,23 +37,46 @@ log() { printf '[entrypoint] %s\n' "$*" >&2; }
 : "${ODOO_DEBUGPY_WAIT:=0}"
 : "${ODOO_EXTRA_ARGS:=}"
 
-# addons_path : enterprise AVANT les addons core, custom en dernier (priorité).
-ADDONS_DIRS=()
-[ -d /mnt/enterprise ]    && [ -n "$(ls -A /mnt/enterprise 2>/dev/null)" ]    && ADDONS_DIRS+=("/mnt/enterprise")
-ADDONS_DIRS+=("/usr/lib/python3/dist-packages/odoo/addons")
-[ -d /mnt/addons-oca ]    && [ -n "$(ls -A /mnt/addons-oca 2>/dev/null)" ]    && ADDONS_DIRS+=("/mnt/addons-oca")
-[ -d /mnt/addons-custom ] && [ -n "$(ls -A /mnt/addons-custom 2>/dev/null)" ] && ADDONS_DIRS+=("/mnt/addons-custom")
+# --- addons_path -------------------------------------------------------------
+# Ordre : enterprise > core > OCA > custom  (le dernier gagne en cas d'homonyme).
+# Les chemins du core et d'enterprise viennent de l'image de base
+# (ODOO_CORE_ADDONS / ODOO_ENTERPRISE_ADDONS) ; les valeurs par défaut ci-dessous
+# couvrent aussi l'image officielle Odoo, au cas où.
+: "${ODOO_CORE_ADDONS:=}"
+: "${ODOO_ENTERPRISE_ADDONS:=/opt/odoo-enterprise}"
 
-# Les dépôts OCA sont des dossiers de dépôts : on ajoute aussi leurs sous-dossiers.
-if [ -d /mnt/addons-oca ]; then
-  for repo in /mnt/addons-oca/*/; do
-    [ -d "$repo" ] || continue
-    # un dépôt OCA contient des modules (dossiers avec __manifest__.py)
-    if compgen -G "${repo}*/__manifest__.py" >/dev/null; then
-      ADDONS_DIRS+=("${repo%/}")
-    fi
+if [ -z "${ODOO_CORE_ADDONS}" ]; then
+  for candidate in /opt/odoo/addons /usr/lib/python3/dist-packages/odoo/addons; do
+    [ -d "${candidate}/base" ] && { ODOO_CORE_ADDONS="${candidate}"; break; }
   done
 fi
+has_content() { [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null | grep -v '^\.gitkeep$')" ]; }
+
+# un dossier « d'addons » contient directement des modules (*/__manifest__.py)
+holds_modules() { compgen -G "$1/*/__manifest__.py" >/dev/null 2>&1; }
+
+if [ -z "${ODOO_CORE_ADDONS}" ] || [ ! -d "${ODOO_CORE_ADDONS}/base" ]; then
+  log "ERREUR : addons core Odoo introuvables (ODOO_CORE_ADDONS=${ODOO_CORE_ADDONS:-<vide>})"
+  log "         l'image de base est-elle correcte ? voir docs/BASE-IMAGES.md"
+  exit 1
+fi
+
+ADDONS_DIRS=()
+has_content "${ODOO_ENTERPRISE_ADDONS}" && ADDONS_DIRS+=("${ODOO_ENTERPRISE_ADDONS}")
+ADDONS_DIRS+=("${ODOO_CORE_ADDONS}")
+
+# addons-oca/ contient soit des modules à plat, soit un dossier par dépôt OCA.
+if holds_modules /mnt/addons-oca; then
+  ADDONS_DIRS+=("/mnt/addons-oca")
+fi
+if [ -d /mnt/addons-oca ]; then
+  for repo in /mnt/addons-oca/*/; do
+    [ -d "${repo}" ] || continue
+    holds_modules "${repo%/}" && ADDONS_DIRS+=("${repo%/}")
+  done
+fi
+
+has_content /mnt/addons-custom && ADDONS_DIRS+=("/mnt/addons-custom")
 
 ADDONS_PATH="$(IFS=,; echo "${ADDONS_DIRS[*]}")"
 export ADDONS_PATH
@@ -89,11 +112,21 @@ if [ "$#" -eq 0 ] || [ "$1" = "odoo" ]; then
   # shellcheck disable=SC2206
   EXTRA=( ${ODOO_EXTRA_ARGS} )
   if [ "${ODOO_DEBUGPY}" = "1" ]; then
-    WAIT_FLAG=()
-    [ "${ODOO_DEBUGPY_WAIT}" = "1" ] && WAIT_FLAG=(--wait-for-client)
-    log "démarrage avec debugpy sur 0.0.0.0:5678 ${WAIT_FLAG[*]-}"
-    exec python3 -m debugpy --listen 0.0.0.0:5678 "${WAIT_FLAG[@]}" \
-         /usr/bin/odoo --config=/etc/odoo/odoo.conf "${EXTRA[@]}" "$@"
+    # debugpy doit lancer le SCRIPT python d'Odoo, pas le wrapper shell `odoo`.
+    ODOO_BIN=""
+    for candidate in "${ODOO_HOME:-/opt/odoo}/odoo-bin" /usr/bin/odoo /usr/local/bin/odoo-bin; do
+      [ -f "${candidate}" ] && head -1 "${candidate}" | grep -q python && { ODOO_BIN="${candidate}"; break; }
+    done
+    if [ -z "${ODOO_BIN}" ]; then
+      log "ATTENTION : odoo-bin introuvable, démarrage sans debugpy"
+    else
+      PY="$(command -v python3)"
+      WAIT_FLAG=()
+      [ "${ODOO_DEBUGPY_WAIT}" = "1" ] && WAIT_FLAG=(--wait-for-client)
+      log "démarrage avec debugpy sur 0.0.0.0:5678 (${ODOO_BIN}) ${WAIT_FLAG[*]-}"
+      exec "${PY}" -m debugpy --listen 0.0.0.0:5678 "${WAIT_FLAG[@]}" \
+           "${ODOO_BIN}" --config=/etc/odoo/odoo.conf "${EXTRA[@]}" "$@"
+    fi
   fi
   exec odoo --config=/etc/odoo/odoo.conf "${EXTRA[@]}" "$@"
 fi

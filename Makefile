@@ -1,94 +1,163 @@
 ###############################################################################
-#  odoo-stack — pilotage du parc de clients Odoo.
-#  Tapez `make` pour voir toutes les commandes.
-#
-#  La plupart des commandes prennent le client en paramètre :  c=<slug>
-#      make up c=acme        make logs c=acme        make backup c=acme
+#  Makefile client — toutes les opérations courantes en une commande.
+#  Tapez simplement `make` pour voir la liste.
 ###############################################################################
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-CLIENTS_DIR := clients
-GREEN := \033[0;32m
+COMPOSE      := docker compose
+DEV_FILES    := -f docker-compose.yml -f docker-compose.dev.yml
+ENV_FILE     := .env
+
+# Charge quelques variables du .env pour l'affichage et les commandes.
+# On NE fait PAS `export` : docker compose lit lui-même le .env, et exporter
+# ces variables ici écraserait ses valeurs (commentaires de fin de ligne inclus).
+-include $(ENV_FILE)
+CLIENT_SLUG      := $(strip $(CLIENT_SLUG))
+ODOO_VERSION     := $(strip $(ODOO_VERSION))
+DB_NAME          := $(strip $(DB_NAME))
+DB_USER          := $(strip $(DB_USER))
+TRAEFIK_NETWORK  := $(strip $(TRAEFIK_NETWORK))
+DOMAIN           := $(strip $(DOMAIN))
+HTTP_PORT        := $(strip $(HTTP_PORT))
+PROXY_PORT       := $(strip $(PROXY_PORT))
+PG_PORT          := $(strip $(PG_PORT))
+DEBUGPY_PORT     := $(strip $(DEBUGPY_PORT))
+
 BLUE  := \033[0;34m
+GREEN := \033[0;32m
 YELL  := \033[0;33m
 RED   := \033[0;31m
 NC    := \033[0m
 
-define need_client
-	@[ -n "$(c)" ] || { printf "$(RED)Précisez le client : make $@ c=<slug>$(NC)\n"; exit 1; }
-	@[ -d "$(CLIENTS_DIR)/$(c)" ] || { printf "$(RED)Client inconnu : $(c)$(NC)\n"; exit 1; }
-endef
-
+## ----------------------------------------------------------------- Aide
 help: ## Affiche cette aide
-	@printf "\n$(BLUE)odoo-stack$(NC) — parc Odoo Enterprise multi-clients\n\n"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	 | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-16s$(NC) %s\n", $$1, $$2}'
-	@printf "\n  $(YELL)Exemples :$(NC)\n"
-	@printf "    make new                 # créer un nouveau client (assistant)\n"
-	@printf "    make list                # lister le parc\n"
-	@printf "    make dev c=acme          # démarrer acme en développement\n"
-	@printf "    make module c=acme m=acme_ventes\n\n"
+	@printf "$(BLUE)Client : $(GREEN)$(CLIENT_SLUG)$(NC)  |  Odoo $(GREEN)$(ODOO_VERSION)$(NC)\n\n"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(firstword $(MAKEFILE_LIST)) \
+	 | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-18s$(NC) %s\n", $$1, $$2}'
+	@printf "\n  Exemples : make dev  |  make logs  |  make upgrade M=sale  |  make backup\n\n"
 
-## --------------------------------------------------------------- Parc clients
-new: ## Assistant de création d'un nouveau client
-	@./new-client.sh
+## ------------------------------------------------------- Cycle de vie (prod)
+up: check-env ensure-network ## Démarre la stack (mode production)
+	$(COMPOSE) up -d --build
+	@$(MAKE) --no-print-directory status
 
-list: ## Liste tous les clients et leurs ports
-	@bash -c 'STACK_ROOT=$(PWD); source lib/common.sh; source lib/registry.sh; registry_list'
+down: ## Arrête la stack (les données sont conservées)
+	$(COMPOSE) down
 
-doctor: ## Vérifie l'environnement et la cohérence du parc
-	@./bin/doctor.sh
+restart: ## Redémarre uniquement Odoo
+	$(COMPOSE) restart odoo
 
-module: ## Nouveau module Odoo : make module c=acme m=acme_ventes
-	@[ -n "$(c)" ] && [ -n "$(m)" ] || { printf "$(RED)Usage : make module c=<slug> m=<module>$(NC)\n"; exit 1; }
-	@./bin/new-module.sh $(c) $(m) "$(t)"
+rebuild: ## Reconstruit l'image Odoo et redémarre
+	$(COMPOSE) build --pull odoo && $(COMPOSE) up -d odoo
 
-## ------------------------------------------------------- Un client en particulier
-up: ## Démarre un client (prod) : make up c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) up
+stop-odoo: ## Arrête Odoo seul (utile avant un restore)
+	$(COMPOSE) stop odoo
 
-dev: ## Démarre un client en développement : make dev c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) dev
+## -------------------------------------------------------- Cycle de vie (dev)
+dev: check-env ensure-network ## Démarre en mode développement (hot-reload + ports exposés)
+	$(COMPOSE) $(DEV_FILES) up -d --build
+	@printf "$(GREEN)Odoo (direct)  : $(NC)http://localhost:$(HTTP_PORT)\n"
+	@printf "$(GREEN)Odoo (nginx)   : $(NC)http://localhost:$(PROXY_PORT)\n"
+	@printf "$(GREEN)PostgreSQL     : $(NC)localhost:$(PG_PORT)\n"
 
-down: ## Arrête un client : make down c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) down
+dev-down: ## Arrête la stack de développement
+	$(COMPOSE) $(DEV_FILES) down
 
-logs: ## Logs d'un client : make logs c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) logs
+debug: check-env ensure-network ## Démarre en dev AVEC debugpy (attend le débogueur VSCode)
+	ODOO_DEBUGPY=1 ODOO_DEBUGPY_WAIT=1 $(COMPOSE) $(DEV_FILES) up -d --build
+	@printf "$(YELL)Odoo attend le débogueur sur le port $(DEBUGPY_PORT) — lancez « Odoo: attach » dans VSCode$(NC)\n"
 
-shell: ## Shell dans le conteneur Odoo : make shell c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) shell
+## -------------------------------------------------------------- Observation
+logs: ## Suit les logs Odoo (Ctrl-C pour quitter)
+	$(COMPOSE) logs -f --tail=200 odoo
 
-backup: ## Sauvegarde d'un client : make backup c=acme
-	$(need_client)
-	@$(MAKE) -C $(CLIENTS_DIR)/$(c) backup
+logs-all: ## Suit les logs de tous les services
+	$(COMPOSE) logs -f --tail=100
 
-## ------------------------------------------------------------ Tout le parc
-status-all: ## État de tous les clients
-	@for d in $(CLIENTS_DIR)/*/; do \
-		[ -f "$$d/docker-compose.yml" ] || continue; \
-		printf "\n$(BLUE)== %s ==$(NC)\n" "$$(basename $$d)"; \
-		(cd "$$d" && docker compose ps --format "table {{.Service}}\t{{.Status}}" 2>/dev/null) || true; \
+status: ## État des conteneurs et santé
+	@$(COMPOSE) ps
+	@printf "\n$(BLUE)Santé Odoo :$(NC) "
+	@$(COMPOSE) exec -T odoo /usr/local/bin/odoo-healthcheck 2>/dev/null || printf "$(RED)indisponible$(NC)\n"
+
+top: ## Consommation CPU / RAM des conteneurs
+	docker stats --no-stream $$($(COMPOSE) ps -q)
+
+## ---------------------------------------------------------------- Exploitation
+shell: ## Shell bash dans le conteneur Odoo
+	$(COMPOSE) exec odoo bash
+
+odoo-shell: ## Shell Python Odoo (env, self, ...) sur la base DB
+	$(COMPOSE) exec odoo odoo shell --config=/etc/odoo/odoo.conf -d $(or $(DB),$(DB_NAME)) --no-http
+
+psql: ## Console PostgreSQL sur la base DB
+	$(COMPOSE) exec db psql -U $(DB_USER) -d $(or $(DB),$(DB_NAME))
+
+install: ## Installe un module : make install M=mon_module
+	@[ -n "$(M)" ] || (printf "$(RED)Précisez M=nom_module$(NC)\n" && exit 1)
+	$(COMPOSE) exec odoo odoo --config=/etc/odoo/odoo.conf \
+		-d $(or $(DB),$(DB_NAME)) -i $(M) --stop-after-init --no-http
+	$(MAKE) --no-print-directory restart
+
+upgrade: ## Met à jour un module : make upgrade M=mon_module (M=all pour tout)
+	@[ -n "$(M)" ] || (printf "$(RED)Précisez M=nom_module$(NC)\n" && exit 1)
+	$(COMPOSE) exec odoo odoo --config=/etc/odoo/odoo.conf \
+		-d $(or $(DB),$(DB_NAME)) -u $(M) --stop-after-init --no-http
+	$(MAKE) --no-print-directory restart
+
+test: ## Lance les tests d'un module : make test M=mon_module
+	@[ -n "$(M)" ] || (printf "$(RED)Précisez M=nom_module$(NC)\n" && exit 1)
+	$(COMPOSE) exec odoo odoo --config=/etc/odoo/odoo.conf \
+		-d $(or $(DB),$(DB_NAME))_test -i $(M) --test-enable \
+		--log-level=test --stop-after-init --no-http
+
+## ----------------------------------------------------------------- Sauvegardes
+backup: ## Sauvegarde immédiate (base + filestore)
+	$(COMPOSE) exec -T backup /bin/sh /scripts/backup.sh $(DB)
+
+backups: ## Liste les sauvegardes disponibles
+	@$(COMPOSE) exec -T backup ls -lh /backups || true
+
+restore: ## Restaure : make restore FILE=/backups/xxx.tar.gz [DB=base_cible]
+	@[ -n "$(FILE)" ] || (printf "$(RED)Précisez FILE=/backups/...$(NC)\n" && exit 1)
+	$(MAKE) --no-print-directory stop-odoo
+	$(COMPOSE) exec -T backup /bin/sh /scripts/restore.sh $(FILE) $(DB)
+	$(COMPOSE) start odoo
+
+backup-pull: ## Copie les sauvegardes du volume vers ./backups-local/
+	@mkdir -p backups-local
+	docker cp $$($(COMPOSE) ps -q backup):/backups/. backups-local/
+	@printf "$(GREEN)Sauvegardes copiées dans ./backups-local/$(NC)\n"
+
+## ------------------------------------------------------------------- Sources
+submodules: ## Initialise / met à jour les dépôts OCA (submodules git)
+	@git submodule update --init --recursive --depth 1 2>/dev/null || true
+	@printf "$(GREEN)Submodules OCA à jour$(NC)\n"
+
+## --------------------------------------------------------------------- Divers
+check-env: ## Vérifie que le .env est présent et complet
+	@[ -f $(ENV_FILE) ] || (printf "$(RED)Fichier .env manquant. Copiez .env.example et complétez-le.$(NC)\n" && exit 1)
+	@for v in CLIENT_SLUG ODOO_VERSION DB_PASSWORD ODOO_MASTER_PASSWORD; do \
+		grep -qE "^$$v=.+" $(ENV_FILE) || { printf "$(RED)Variable $$v absente ou vide dans .env$(NC)\n"; exit 1; }; \
 	done
+	@printf "$(GREEN).env valide$(NC)\n"
 
-backup-all: ## Sauvegarde immédiate de tous les clients
-	@for d in $(CLIENTS_DIR)/*/; do \
-		[ -f "$$d/docker-compose.yml" ] || continue; \
-		printf "\n$(BLUE)== %s ==$(NC)\n" "$$(basename $$d)"; \
-		(cd "$$d" && $(MAKE) --no-print-directory backup) || printf "$(RED)échec$(NC)\n"; \
-	done
+ensure-network: ## Crée le réseau du reverse-proxy s'il n'existe pas encore
+	@docker network inspect $(or $(TRAEFIK_NETWORK),traefik) >/dev/null 2>&1 \
+	 || { printf "$(YELL)création du réseau $(or $(TRAEFIK_NETWORK),traefik)$(NC)\n"; \
+	      docker network create $(or $(TRAEFIK_NETWORK),traefik) >/dev/null; }
 
-pull-all: ## git pull sur tous les dépôts clients
-	@for d in $(CLIENTS_DIR)/*/; do \
-		[ -d "$$d/.git" ] || continue; \
-		printf "$(BLUE)%-20s$(NC) " "$$(basename $$d)"; \
-		(cd "$$d" && git pull --ff-only 2>&1 | tail -1) || true; \
-	done
+pull-base: ## Récupère la dernière image de base Odoo du registre
+	@grep -E '^ODOO_BASE_IMAGE=' $(ENV_FILE) | cut -d= -f2- | sed 's/[[:space:]]*#.*$$//' | xargs docker pull
 
-.PHONY: help new list doctor module up dev down logs shell backup status-all backup-all pull-all
+config: ## Affiche la configuration docker compose résolue (débogage)
+	$(COMPOSE) config
+
+clean: ## Supprime la stack ET SES DONNÉES (irréversible)
+	@printf "$(RED)Cela supprimera la base et le filestore de $(CLIENT_SLUG). Tapez le nom du client pour confirmer : $(NC)"
+	@read ans && [ "$$ans" = "$(CLIENT_SLUG)" ] || (printf "Annulé\n" && exit 1)
+	$(COMPOSE) down -v
+
+.PHONY: help up down restart rebuild stop-odoo dev dev-down debug logs logs-all \
+        status top shell odoo-shell psql install upgrade test backup backups \
+        restore backup-pull submodules ensure-network pull-base check-env config clean
