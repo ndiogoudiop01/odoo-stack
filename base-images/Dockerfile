@@ -112,7 +112,7 @@ ENV LANG=C.UTF-8 \
     ODOO_VERSION=${ODOO_VERSION} \
     ODOO_EDITION=${EDITION} \
     ODOO_HOME=/opt/odoo \
-    ODOO_CORE_ADDONS=/opt/odoo/addons \
+    ODOO_CORE_ADDONS= \
     ODOO_ENTERPRISE_ADDONS=/opt/odoo-enterprise \
     ODOO_RC=/etc/odoo/odoo.conf
 
@@ -161,7 +161,11 @@ RUN set -eux; \
     chown -R odoo:odoo /var/lib/odoo /var/log/odoo /etc/odoo /mnt; \
     # garde-fou : l'image ne sort du build que si Odoo s'importe réellement
     /opt/venv/bin/python -c "import odoo; print('OK — Odoo', odoo.release.version)"; \
-    test -d /opt/odoo/addons/base || (echo 'addons core introuvable' && exit 1)
+    # le module « base » vit dans odoo/addons/base (git ET archive Sources) ;
+    # addons/ contient le reste des modules standard
+    test -d /opt/odoo/odoo/addons/base || test -d /opt/odoo/addons/base \
+      || (echo 'module base introuvable' && exit 1); \
+    test -x /opt/odoo/odoo-bin || (echo 'odoo-bin absent' && exit 1)
 
 VOLUME ["/var/lib/odoo"]
 EXPOSE 8069 8072 5678

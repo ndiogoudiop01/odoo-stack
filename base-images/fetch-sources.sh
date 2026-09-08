@@ -77,15 +77,27 @@ show_tree() {
 }
 
 # ------------------------------------------------------ détection de la racine
-# Racine Odoo = dossier contenant odoo-bin (ou, à défaut, odoo/release.py)
+#  Deux structures possibles pour le core :
+#    · clone git de odoo/odoo        -> odoo-bin à la racine
+#    · archive « Sources » odoo.com  -> PAS d'odoo-bin, mais setup.py + odoo/
+#      (le lanceur y est setup/odoo ; on en régénère un plus bas)
+#  Le repère fiable et commun aux deux est le paquet python : odoo/release.py
 detect_odoo_root() {
   base="$1"
   if [ -n "${ODOO_SUBDIR}" ]; then
     [ -d "${base}/${ODOO_SUBDIR}" ] || fail "ODOO_SUBDIR=${ODOO_SUBDIR} introuvable dans le dépôt"
     printf '%s' "${base}/${ODOO_SUBDIR}"; return 0
   fi
+  # 1) clone git : odoo-bin
   hit="$(find "${base}" -maxdepth 4 -type f -name 'odoo-bin' 2>/dev/null | head -1)"
-  [ -n "${hit}" ] || hit="$(find "${base}" -maxdepth 5 -type f -path '*/odoo/release.py' 2>/dev/null | head -1 | sed 's|/odoo/release.py$|/x|')"
+  if [ -n "${hit}" ]; then dirname "${hit}"; return 0; fi
+  # 2) archive sources : le paquet python odoo/release.py
+  hit="$(find "${base}" -maxdepth 5 -type f -path '*/odoo/release.py' 2>/dev/null | head -1)"
+  if [ -n "${hit}" ]; then dirname "$(dirname "${hit}")"; return 0; fi
+  # 3) dernier recours : setup.py à côté d'un dossier odoo/
+  hit="$(find "${base}" -maxdepth 3 -type f -name 'setup.py' 2>/dev/null | while read -r f; do
+           [ -d "$(dirname "${f}")/odoo" ] && { echo "${f}"; break; }
+         done)"
   [ -n "${hit}" ] || return 1
   dirname "${hit}"
 }
@@ -161,9 +173,41 @@ else
 fi
 
 # --- contrôles de cohérence ----------------------------------------------------
-[ -f /src/odoo/odoo-bin ]     || fail "odoo-bin absent après normalisation"
-[ -d /src/odoo/odoo ]         || fail "paquet python odoo/ absent après normalisation"
-[ -d /src/odoo/addons ]       || log "ATTENTION : /src/odoo/addons absent (fork partiel ?)"
+[ -d /src/odoo/odoo ]            || fail "paquet python odoo/ absent après normalisation"
+[ -f /src/odoo/odoo/release.py ] || fail "odoo/release.py absent : ce n'est pas une source Odoo valide"
+
+# Lanceur : le clone git fournit odoo-bin, l'archive « Sources » d'odoo.com non
+# (elle expose setup/odoo). On en régénère un pour avoir un point d'entrée
+# identique dans tous les cas — c'est ce que l'entrypoint et debugpy utilisent.
+if [ ! -f /src/odoo/odoo-bin ]; then
+  if [ -f /src/odoo/setup/odoo ]; then
+    log "odoo-bin absent (archive Sources) : lanceur repris depuis setup/odoo"
+    cp /src/odoo/setup/odoo /src/odoo/odoo-bin
+  else
+    log "odoo-bin absent : génération d'un lanceur équivalent"
+    cat > /src/odoo/odoo-bin <<'LAUNCHER'
+#!/usr/bin/env python3
+# Lanceur généré par odoo-stack : les archives « Sources » d'odoo.com ne
+# contiennent pas odoo-bin. Strictement équivalent à celui du dépôt git.
+import odoo
+if __name__ == "__main__":
+    odoo.cli.main()
+LAUNCHER
+  fi
+  chmod +x /src/odoo/odoo-bin
+fi
+
+# --- où sont les addons du core ? ----------------------------------------------
+# clone git   : odoo/addons/base (module base) + addons/ (le reste)
+# archive src : idem, mais addons/ peut être absent sur un fork partiel
+CORE_ADDONS=""
+for d in /src/odoo/addons /src/odoo/odoo/addons; do
+  [ -d "${d}" ] && [ -n "$(ls -A "${d}" 2>/dev/null)" ] && CORE_ADDONS="${CORE_ADDONS}${CORE_ADDONS:+,}${d#/src/odoo}"
+done
+[ -d /src/odoo/odoo/addons/base ] || [ -d /src/odoo/addons/base ] \
+  || fail "module « base » introuvable (ni odoo/addons/base ni addons/base) :
+         la source du core est incomplète."
+log "addons du core : ${CORE_ADDONS:-aucun}"
 
 # --- traçabilité ---------------------------------------------------------------
 {
@@ -171,6 +215,7 @@ fi
   echo "odoo_subdir=${ODOO_REL:-.}"
   echo "odoo_commit=${ODOO_COMMIT}"
   echo "odoo_branch=${ODOO_BRANCH}"
+  echo "odoo_core_addons=${CORE_ADDONS}"
   echo "edition=${EDITION}"
   if [ "${EDITION}" = "enterprise" ]; then
     echo "enterprise_repo=${GITHUB_OWNER}/${ENTERPRISE_REPO}"

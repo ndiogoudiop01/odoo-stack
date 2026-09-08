@@ -205,8 +205,19 @@ EOF
 
   # 3. structure
   local dir="${WORK}/${repo}"
-  git clone --depth 1 --branch "${branch}" --single-branch \
-      "$(repo_url "${repo}")" "${dir}" >/dev/null 2>&1 || { err "clone échoué"; return 1; }
+  if ! git clone --depth 1 --branch "${branch}" --single-branch \
+        "$(repo_url "${repo}")" "${dir}" >/dev/null 2>/tmp/clone.err; then
+    err "clone échoué"
+    printf "  sortie de git :\n"; mask < /tmp/clone.err | sed 's/^/    /'
+    printf "  espace disque disponible : %s\n" "$(df -h "${WORK}" | awk 'NR==2 {print $4}')"
+    cat <<EOF
+  Pistes :
+    · dépôt volumineux + disque plein -> libérez de la place (docker system prune -af)
+    · dépôt utilisant Git LFS -> installez git-lfs, ou déposez les sources sans LFS
+    · coupure réseau pendant le transfert -> réessayez
+EOF
+    return 1
+  fi
 
   printf "  racine du dépôt :\n"
   find "${dir}" -maxdepth 1 -not -path '*/.git*' -not -path "${dir}" \
@@ -214,7 +225,7 @@ EOF
 
   printf "  fichiers clés :\n"
   local found
-  for f in odoo-bin requirements.txt setup.py; do
+  for f in odoo-bin requirements.txt setup.py release.py; do
     found="$(find "${dir}" -maxdepth 4 -name "${f}" -not -path '*/.git/*' | head -1)"
     if [ -n "${found}" ]; then
       printf "    %-18s ${C_GRN}%s${C_OFF}\n" "${f}" "${found#"${dir}"/}"
@@ -226,8 +237,20 @@ EOF
   [ -n "${found}" ] && printf "    %-18s ${C_GRN}%s${C_OFF}\n" "premier module" "$(dirname "${found#"${dir}"/}")"
 
   # 4. sous-dossier à utiliser
-  local bin sub
+  local bin sub rel
   bin="$(find "${dir}" -maxdepth 4 -name 'odoo-bin' -not -path '*/.git/*' | head -1)"
+  if [ -z "${bin}" ] && [ "${kind}" = "Core Odoo" ]; then
+    # archive « Sources » d'odoo.com : pas d'odoo-bin, mais le paquet python
+    rel="$(find "${dir}" -maxdepth 5 -type f -path '*/odoo/release.py' -not -path '*/.git/*' | head -1)"
+    if [ -n "${rel}" ]; then
+      sub="$(dirname "$(dirname "$(dirname "${rel#"${dir}"/}")")")"
+      ok "archive « Sources » détectée (pas d'odoo-bin, c'est normal)"
+      info "racine Odoo : « ${sub:-.} » — un lanceur odoo-bin sera généré au build"
+      return 0
+    fi
+    err "ni odoo-bin ni odoo/release.py : ce dépôt ne contient pas les sources d'Odoo"
+    return 1
+  fi
   if [ -n "${bin}" ]; then
     sub="$(dirname "${bin#"${dir}"/}")"
     [ "${sub}" = "." ] && info "racine Odoo : à la racine du dépôt (détection automatique OK)" \

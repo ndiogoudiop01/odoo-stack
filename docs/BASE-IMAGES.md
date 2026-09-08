@@ -95,6 +95,37 @@ Si la détection échoue malgré tout :
     --odoo-subdir 19.0 --enterprise-subdir 19.0
 ```
 
+### Sources téléchargées depuis odoo.com (sans `odoo-bin`)
+
+Si vous avez déposé dans votre dépôt l'archive **Sources** d'odoo.com plutôt
+qu'un clone de `odoo/odoo`, la structure diffère :
+
+| | clone git `odoo/odoo` | archive Sources odoo.com |
+|---|---|---|
+| lanceur | `odoo-bin` à la racine | **absent** — le script est `setup/odoo` |
+| packaging | pas de `setup.py` utile | `setup.py`, `PKG-INFO` |
+| paquet python | `odoo/` | `odoo/` |
+| module `base` | `odoo/addons/base` | `odoo/addons/base` |
+| autres modules | `addons/` | `addons/` |
+
+`odoo-bin absent` **n'est donc pas une erreur** dans ce cas. Le build le gère :
+il reprend `setup/odoo` s'il existe, sinon il génère un lanceur équivalent
+
+```python
+#!/usr/bin/env python3
+import odoo
+if __name__ == "__main__":
+    odoo.cli.main()
+```
+
+et l'image expose toujours `/opt/odoo/odoo-bin`. Le vrai repère de validité
+n'est pas `odoo-bin` mais **`odoo/release.py`** et la présence du module `base` :
+c'est ce que le build vérifie.
+
+> **Enterprise n'a jamais d'`odoo-bin`** : c'est un jeu de modules, pas un
+> serveur. La sonde n'en cherche pas dans ce dépôt — elle y cherche des
+> `__manifest__.py`.
+
 ### La branche ne porte pas le nom de la version
 
 Si votre dépôt core n'a pas de branche `19.0` mais que vous voulez quand même
@@ -241,6 +272,9 @@ lundi à 3h UTC et publie sur GHCR. Copiez-le en
 | `racine Odoo introuvable (aucun odoo-bin)` | le code est dans un sous-dossier, ou le dépôt n'est pas un fork d'Odoo | `--probe` puis `--odoo-subdir <chemin>` |
 | `aucun module Enterprise trouvé` | modules dans un sous-dossier | `--probe` puis `--enterprise-subdir <chemin>` |
 | `requirements.txt introuvable` | fork partiel du core | ajouter un `requirements.txt` à la racine du fork (copiable depuis `odoo/odoo` à la même version) |
+| `odoo-bin absent` dans la sonde | archive Sources d'odoo.com (normal) ou dépôt Enterprise (normal) | rien à faire : le build génère le lanceur |
+| `module « base » introuvable` | source du core incomplète | vérifier la présence de `odoo/addons/base` dans le dépôt |
+| `clone échoué` après « branche présente » | disque plein, Git LFS, ou coupure réseau | la sonde affiche l'erreur git et l'espace disque ; `docker system prune -af` libère souvent le nécessaire |
 | `denied: permission_denied` au push | pas connecté à ghcr.io, ou PAT sans `write:packages` | `docker login ghcr.io` avec un PAT qui a `write:packages` |
 | Le VPS ne peut pas tirer l'image | serveur non authentifié au registre | `docker login ghcr.io` sur le VPS |
 | Build très long | `GIT_DEPTH=0` | repasser à `GIT_DEPTH=1` |
