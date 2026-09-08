@@ -30,35 +30,28 @@ ARG ENTERPRISE_REPO=enterprise
 ARG ODOO_VERSION=19.0
 ARG EDITION=enterprise
 ARG GIT_DEPTH=1
+# Sous-dossiers à forcer si la détection automatique de la racine échoue
+ARG ODOO_SUBDIR=
+ARG ENTERPRISE_SUBDIR=
+
+ENV GITHUB_OWNER=${GITHUB_OWNER} \
+    ODOO_REPO=${ODOO_REPO} \
+    ENTERPRISE_REPO=${ENTERPRISE_REPO} \
+    ODOO_VERSION=${ODOO_VERSION} \
+    EDITION=${EDITION} \
+    GIT_DEPTH=${GIT_DEPTH} \
+    ODOO_SUBDIR=${ODOO_SUBDIR} \
+    ENTERPRISE_SUBDIR=${ENTERPRISE_SUBDIR}
 
 WORKDIR /src
 
-RUN --mount=type=secret,id=gh_token \
-    set -eux; \
-    TOKEN="$(cat /run/secrets/gh_token)"; \
-    # GIT_DEPTH=0 -> historique complet ; sinon clone superficiel
-    if [ "${GIT_DEPTH}" = "0" ]; then DEPTH=""; else DEPTH="--depth ${GIT_DEPTH}"; fi; \
-    # shellcheck disable=SC2086
-    git clone ${DEPTH} --branch "${ODOO_VERSION}" --single-branch \
-        "https://x-access-token:${TOKEN}@github.com/${GITHUB_OWNER}/${ODOO_REPO}.git" odoo; \
-    if [ "${EDITION}" = "enterprise" ]; then \
-        git clone ${DEPTH} --branch "${ODOO_VERSION}" --single-branch \
-            "https://x-access-token:${TOKEN}@github.com/${GITHUB_OWNER}/${ENTERPRISE_REPO}.git" enterprise; \
-    else \
-        mkdir -p enterprise; \
-    fi; \
-    { \
-      echo "odoo_repo=${GITHUB_OWNER}/${ODOO_REPO}"; \
-      echo "branch=${ODOO_VERSION}"; \
-      echo "edition=${EDITION}"; \
-      echo "odoo_commit=$(git -C odoo rev-parse HEAD)"; \
-      if [ -d enterprise/.git ]; then \
-        echo "enterprise_repo=${GITHUB_OWNER}/${ENTERPRISE_REPO}"; \
-        echo "enterprise_commit=$(git -C enterprise rev-parse HEAD)"; \
-      fi; \
-      echo "built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; \
-    } > /src/SOURCES.txt; \
-    rm -rf odoo/.git enterprise/.git
+# Le clone et la normalisation de l'arborescence sont dans un script dédié :
+# il détecte la racine réelle d'Odoo (le dépôt peut la placer dans un
+# sous-dossier) et garantit /src/odoo, /src/enterprise et /src/requirements.txt.
+COPY fetch-sources.sh /usr/local/bin/fetch-sources
+RUN chmod +x /usr/local/bin/fetch-sources
+
+RUN --mount=type=secret,id=gh_token /usr/local/bin/fetch-sources
 
 ###############################################################################
 #  ÉTAGE 2 — dépendances Python compilées dans un venv
@@ -78,7 +71,7 @@ RUN set -eux; \
         libwebp-dev libtiff-dev libopenjp2-7-dev; \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=sources /src/odoo/requirements.txt /tmp/requirements.txt
+COPY --from=sources /src/requirements.txt /tmp/requirements.txt
 
 # Dépendances supplémentaires communes à tous nos projets.
 # Ajoutez ici ce qui doit être disponible pour TOUS les clients ;

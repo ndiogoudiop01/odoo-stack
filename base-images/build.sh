@@ -12,10 +12,14 @@
 #      ./base-images/build.sh all --push                # toutes les versions
 #
 #  Options :
-#      --push            pousse l'image sur le registre après le build
-#      --no-cache        build complet sans cache
-#      --python 3.11     force la version de Python
-#      --platform ...    ex. linux/amd64,linux/arm64 (implique --push)
+#      --push                    pousse l'image sur le registre après le build
+#      --no-cache                build complet sans cache
+#      --python 3.11             force la version de Python
+#      --platform ...            ex. linux/amd64,linux/arm64 (implique --push)
+#      --odoo-subdir <chemin>    si la racine d'Odoo est dans un sous-dossier
+#      --enterprise-subdir <ch.> idem pour les modules Enterprise
+#      --probe                   ne construit rien : affiche l'arborescence des
+#                                dépôts pour diagnostiquer une détection ratée
 #
 #  Configuration : base-images/base.env  (créé au premier lancement)
 ###############################################################################
@@ -79,12 +83,16 @@ EDITION="enterprise"
 case "${1:-}" in enterprise|community) EDITION="$1"; shift ;; esac
 
 PUSH=0; NO_CACHE=""; PLATFORM=""; PYTHON_VERSION=""
+ODOO_SUBDIR=""; ENTERPRISE_SUBDIR=""; PROBE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --push)     PUSH=1; shift ;;
     --no-cache) NO_CACHE="--no-cache"; shift ;;
     --python)   PYTHON_VERSION="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; PUSH=1; shift 2 ;;
+    --odoo-subdir)       ODOO_SUBDIR="$2"; shift 2 ;;
+    --enterprise-subdir) ENTERPRISE_SUBDIR="$2"; shift 2 ;;
+    --probe)    PROBE=1; shift ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -119,6 +127,8 @@ build_one() {
     buildx build
     --file "${BASE_DIR}/Dockerfile"
     --build-arg "GITHUB_OWNER=${GITHUB_OWNER}"
+    --build-arg "ODOO_SUBDIR=${ODOO_SUBDIR}"
+    --build-arg "ENTERPRISE_SUBDIR=${ENTERPRISE_SUBDIR}"
     --build-arg "ODOO_REPO=${ODOO_REPO}"
     --build-arg "ENTERPRISE_REPO=${ENTERPRISE_REPO}"
     --build-arg "ODOO_VERSION=${version}"
@@ -144,6 +154,44 @@ build_one() {
     docker run --rm --entrypoint cat "${tag}" /opt/SOURCES.txt | sed 's/^/    /'
   fi
 }
+
+# ------------------------------------------------------------------- probe
+if [ "${PROBE}" -eq 1 ]; then
+  title "Sondage des dépôts — Odoo ${VERSION} (${EDITION})"
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "${WORK}"' EXIT
+  for repo in "${ODOO_REPO}" "${ENTERPRISE_REPO}"; do
+    [ "${EDITION}" = "community" ] && [ "${repo}" = "${ENTERPRISE_REPO}" ] && continue
+    info "clone ${GITHUB_OWNER}/${repo} @ ${VERSION} …"
+    if git clone --depth 1 --branch "${VERSION}" --single-branch \
+         "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${repo}.git" \
+         "${WORK}/${repo}" >/dev/null 2>&1; then
+      ok "cloné"
+      printf "\n  Arborescence (2 niveaux) :\n"
+      find "${WORK}/${repo}" -maxdepth 2 -not -path '*/.git*' \
+        | sed "s|${WORK}/${repo}|  .|" | sort | head -40
+      printf "\n  Fichiers clés :\n"
+      for f in odoo-bin requirements.txt setup.py; do
+        found="$(find "${WORK}/${repo}" -maxdepth 4 -name "${f}" -not -path '*/.git/*' | head -1)"
+        [ -n "${found}" ] && printf "    %-18s -> %s\n" "${f}" "${found#${WORK}/${repo}/}" \
+                          || printf "    %-18s -> ${C_RED}absent${C_OFF}\n" "${f}"
+      done
+      man="$(find "${WORK}/${repo}" -maxdepth 3 -name '__manifest__.py' -not -path '*/.git/*' | head -1)"
+      [ -n "${man}" ] && printf "    %-18s -> %s\n" "premier module" "$(dirname "${man#${WORK}/${repo}/}")"
+      printf "\n"
+    else
+      err "clone impossible (dépôt, branche ${VERSION} ou droits du token)"
+    fi
+  done
+  cat <<EOF
+Si « odoo-bin » n'est PAS à la racine, relancez le build avec :
+
+    ./base-images/build.sh ${VERSION} ${EDITION} --odoo-subdir <chemin affiché ci-dessus>
+
+Idem avec --enterprise-subdir si les modules Enterprise sont dans un sous-dossier.
+EOF
+  exit 0
+fi
 
 # --------------------------------------------------------------- login registre
 if [ "${PUSH}" -eq 1 ]; then
