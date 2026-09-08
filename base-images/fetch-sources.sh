@@ -22,8 +22,7 @@ set -eu
 log()  { printf '[sources] %s\n' "$*" >&2; }
 fail() { printf '[sources] ERREUR : %s\n' "$*" >&2; exit 1; }
 
-TOKEN="$(cat /run/secrets/gh_token)"
-[ -n "${TOKEN}" ] || fail "secret gh_token vide"
+TOKEN="$(cat /run/secrets/gh_token 2>/dev/null || true)"
 
 : "${GITHUB_OWNER:?GITHUB_OWNER manquant}"
 : "${ODOO_REPO:=odoo}"
@@ -33,18 +32,41 @@ TOKEN="$(cat /run/secrets/gh_token)"
 : "${GIT_DEPTH:=1}"
 : "${ODOO_SUBDIR:=}"          # forcer le sous-dossier si la détection échoue
 : "${ENTERPRISE_SUBDIR:=}"
+# La branche peut différer du numéro de version (dépôt sans branche 19.0, etc.)
+: "${ODOO_BRANCH:=${ODOO_VERSION}}"
+: "${ENTERPRISE_BRANCH:=${ODOO_VERSION}}"
+
+[ -n "${TOKEN}" ] || log "aucun token fourni : clone anonyme (dépôts publics uniquement)"
+
+# URL de clone, avec ou sans token
+repo_url() {
+  if [ -n "${TOKEN}" ]; then
+    printf 'https://x-access-token:%s@github.com/%s/%s.git' "${TOKEN}" "${GITHUB_OWNER}" "$1"
+  else
+    printf 'https://github.com/%s/%s.git' "${GITHUB_OWNER}" "$1"
+  fi
+}
 
 if [ "${GIT_DEPTH}" = "0" ]; then DEPTH=""; else DEPTH="--depth ${GIT_DEPTH}"; fi
 
 # --------------------------------------------------------------------- clone
 clone_repo() {
-  repo="$1"; dest="$2"
-  log "clone ${GITHUB_OWNER}/${repo} (branche ${ODOO_VERSION})"
+  repo="$1"; dest="$2"; branch="$3"
+  log "clone ${GITHUB_OWNER}/${repo} (branche ${branch})"
   # shellcheck disable=SC2086
-  git clone ${DEPTH} --branch "${ODOO_VERSION}" --single-branch \
-      "https://x-access-token:${TOKEN}@github.com/${GITHUB_OWNER}/${repo}.git" "${dest}" \
-    || fail "clone impossible : ${GITHUB_OWNER}/${repo}, branche ${ODOO_VERSION}.
-         Vérifiez le nom du dépôt, l'existence de la branche et les droits du token."
+  if git clone ${DEPTH} --branch "${branch}" --single-branch "$(repo_url "${repo}")" "${dest}" 2>/tmp/git.err; then
+    return 0
+  fi
+  log "----- sortie de git -----"
+  sed "s|${TOKEN:-@@nope@@}|***|g" /tmp/git.err >&2 || true
+  log "-------------------------"
+  log "branches disponibles sur ${GITHUB_OWNER}/${repo} :"
+  if git ls-remote --heads "$(repo_url "${repo}")" 2>/dev/null | sed 's|.*refs/heads/|  - |' >&2; then :; else
+    log "  (impossible de lister : dépôt inexistant, privé sans droits, ou token invalide)"
+  fi
+  fail "clone impossible : ${GITHUB_OWNER}/${repo}, branche ${branch}.
+         Causes possibles : nom de dépôt erroné (attention à enterprise / entreprise),
+         branche absente (voir la liste ci-dessus), ou token sans accès à ce dépôt."
 }
 
 # Affiche l'arborescence utile pour diagnostiquer une détection ratée
@@ -82,12 +104,12 @@ detect_enterprise_root() {
 
 # ------------------------------------------------------------------ exécution
 mkdir -p /src
-clone_repo "${ODOO_REPO}" /tmp/raw-odoo
+clone_repo "${ODOO_REPO}" /tmp/raw-odoo "${ODOO_BRANCH}"
 
 ODOO_ROOT="$(detect_odoo_root /tmp/raw-odoo || true)"
 if [ -z "${ODOO_ROOT}" ]; then
   show_tree /tmp/raw-odoo
-  fail "racine Odoo introuvable (aucun odoo-bin dans ${GITHUB_OWNER}/${ODOO_REPO}).
+  fail "racine Odoo introuvable (aucun odoo-bin dans ${GITHUB_OWNER}/${ODOO_REPO}@${ODOO_BRANCH}).
          Si le code est dans un sous-dossier, relancez avec :
              ./base-images/build.sh ${ODOO_VERSION} ${EDITION} --odoo-subdir <chemin>"
 fi
@@ -97,7 +119,7 @@ log "racine Odoo détectée : ${ODOO_REL:-<racine du dépôt>}"
 # --- Enterprise ---------------------------------------------------------------
 ENT_REL="-"
 if [ "${EDITION}" = "enterprise" ]; then
-  clone_repo "${ENTERPRISE_REPO}" /tmp/raw-enterprise
+  clone_repo "${ENTERPRISE_REPO}" /tmp/raw-enterprise "${ENTERPRISE_BRANCH}"
   ENT_ROOT="$(detect_enterprise_root /tmp/raw-enterprise || true)"
   if [ -z "${ENT_ROOT}" ]; then
     show_tree /tmp/raw-enterprise
@@ -148,10 +170,11 @@ fi
   echo "odoo_repo=${GITHUB_OWNER}/${ODOO_REPO}"
   echo "odoo_subdir=${ODOO_REL:-.}"
   echo "odoo_commit=${ODOO_COMMIT}"
-  echo "branch=${ODOO_VERSION}"
+  echo "odoo_branch=${ODOO_BRANCH}"
   echo "edition=${EDITION}"
   if [ "${EDITION}" = "enterprise" ]; then
     echo "enterprise_repo=${GITHUB_OWNER}/${ENTERPRISE_REPO}"
+    echo "enterprise_branch=${ENTERPRISE_BRANCH}"
     echo "enterprise_subdir=${ENT_REL:-.}"
     echo "enterprise_commit=${ENT_COMMIT}"
   fi

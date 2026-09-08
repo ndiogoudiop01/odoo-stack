@@ -63,7 +63,63 @@ Ce fichier contient un token : il est déjà dans `.gitignore` et créé en `chm
 
 ---
 
-## 3. Construire
+## 3. Vérifier la structure de vos dépôts (recommandé au premier build)
+
+Vos forks n'ont pas forcément la même arborescence que `odoo/odoo`. Le mode
+`--probe` clone et affiche ce qu'il trouve, sans rien construire :
+
+```bash
+./base-images/build.sh 19.0 enterprise --probe
+```
+
+Pour chaque dépôt, la sonde répond à trois questions dans l'ordre :
+
+1. **le dépôt est-il joignable ?** sinon, elle affiche la sortie brute de git
+   (token masqué) — nom de dépôt erroné, dépôt privé sans droits, token expiré ;
+2. **la branche existe-t-elle ?** sinon, elle liste toutes les branches du dépôt ;
+3. **où est le code ?** elle affiche la racine, `odoo-bin`, `requirements.txt` et
+   le premier module trouvé.
+
+### Le code est dans un sous-dossier : c'est géré
+
+Beaucoup de dépôts rangent les sources dans un dossier portant le numéro de
+version — `github.com/<owner>/odoo/tree/18.0/18.0` signifie *branche `18.0`,
+dossier `18.0`*. Le build **détecte tout seul** la racine d'Odoo (le dossier
+contenant `odoo-bin`) et celle d'Enterprise (le dossier contenant des
+`__manifest__.py`), jusqu'à 4 niveaux de profondeur. Rien à configurer.
+
+Si la détection échoue malgré tout :
+
+```bash
+./base-images/build.sh 19.0 enterprise \
+    --odoo-subdir 19.0 --enterprise-subdir 19.0
+```
+
+### La branche ne porte pas le nom de la version
+
+Si votre dépôt core n'a pas de branche `19.0` mais que vous voulez quand même
+construire une image `19.0` :
+
+```bash
+./base-images/build.sh 19.0 enterprise \
+    --odoo-branch 18.0 --enterprise-branch 19.0
+```
+
+> **Attention à l'orthographe du dépôt.** `entreprise` (français) et
+> `enterprise` (anglais) sont deux noms différents pour GitHub. Renseignez le nom
+> exact dans `ENTERPRISE_REPO` de `base.env`.
+
+Quelle que soit la structure d'origine, l'image finale est toujours normalisée :
+`/opt/odoo` (avec `odoo-bin`), `/opt/odoo-enterprise` (les modules).
+
+### Dépôts publics
+
+Si vos dépôts sont publics, laissez `GITHUB_TOKEN` vide : le clone se fait en
+anonyme. Le token reste nécessaire pour publier sur `ghcr.io`.
+
+---
+
+## 4. Construire
 
 ```bash
 ./base-images/build.sh 19.0 enterprise            # build local (test)
@@ -85,7 +141,7 @@ sont introuvables — une image cassée ne sort jamais du build.
 | `/opt/odoo` | votre dépôt core (branche = version) |
 | `/opt/odoo-enterprise` | votre dépôt enterprise (vide en édition community) |
 | `/opt/venv` | dépendances Python (`requirements.txt` d'Odoo + `extra-requirements.txt`) |
-| `/opt/SOURCES.txt` | dépôts, branches et **commits exacts** embarqués |
+| `/opt/SOURCES.txt` | dépôts, branches, **sous-dossiers détectés** et **commits exacts** embarqués |
 | `wkhtmltopdf` | build « patched Qt », indispensable aux rapports PDF |
 | `rtlcss` | rendu des langues RTL (arabe) |
 
@@ -109,7 +165,7 @@ docker run --rm ghcr.io/odooafia/odoo:19.0-enterprise \
 
 ---
 
-## 4. Publier et autoriser le VPS
+## 5. Publier et autoriser le VPS
 
 ```bash
 # Poste de développement — publication
@@ -130,7 +186,7 @@ serveurs de la tirer sans partager votre PAT : GitHub → Packages → le packag
 
 ---
 
-## 5. Ajouter une dépendance Python à toutes les images
+## 6. Ajouter une dépendance Python à toutes les images
 
 `base-images/extra-requirements.txt` est installé dans **toutes** les images de
 base. Ce qui ne concerne qu'un seul client reste dans
@@ -143,7 +199,7 @@ echo "openupgradelib==3.7.0" >> base-images/extra-requirements.txt
 
 ---
 
-## 6. Mettre à jour un client vers une nouvelle image
+## 7. Mettre à jour un client vers une nouvelle image
 
 ```bash
 # 1. reconstruire l'image de base après un push sur votre branche 19.0
@@ -165,7 +221,7 @@ redéployez.
 
 ---
 
-## 7. Automatiser (GitHub Actions)
+## 8. Automatiser (GitHub Actions)
 
 `base-images/github-actions.example.yml` reconstruit les trois versions chaque
 lundi à 3h UTC et publie sur GHCR. Copiez-le en
@@ -174,13 +230,17 @@ lundi à 3h UTC et publie sur GHCR. Copiez-le en
 
 ---
 
-## 8. Problèmes fréquents
+## 9. Problèmes fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
-| `Repository not found` pendant le build | le PAT n'a pas accès aux deux dépôts | vérifier *Repository access* du token fine-grained |
-| `Remote branch 19.0 not found` | la branche n'existe pas dans votre fork | créer la branche, ou passer `--version` sur une branche existante |
-| `no such file: requirements.txt` | dépôt core sans `requirements.txt` à la racine | vérifier que le fork est bien complet |
+| `clone impossible` sans détail | ancienne version du script | mettre à jour : la sortie de git et la liste des branches sont désormais affichées |
+| `Repository not found` | nom de dépôt erroné (`entreprise` vs `enterprise`), ou PAT sans accès | corriger `ENTERPRISE_REPO` dans `base.env` ; vérifier *Repository access* du token fine-grained |
+| `Remote branch 19.0 not found` | la branche n'existe pas dans ce dépôt | `--probe` liste les branches ; utiliser `--odoo-branch` / `--enterprise-branch` |
+| `failed to compute cache key: "/src/odoo/requirements.txt": not found` | ancienne version du Dockerfile | mettre à jour : le build normalise désormais l'arborescence et produit `/src/requirements.txt` |
+| `racine Odoo introuvable (aucun odoo-bin)` | le code est dans un sous-dossier, ou le dépôt n'est pas un fork d'Odoo | `--probe` puis `--odoo-subdir <chemin>` |
+| `aucun module Enterprise trouvé` | modules dans un sous-dossier | `--probe` puis `--enterprise-subdir <chemin>` |
+| `requirements.txt introuvable` | fork partiel du core | ajouter un `requirements.txt` à la racine du fork (copiable depuis `odoo/odoo` à la même version) |
 | `denied: permission_denied` au push | pas connecté à ghcr.io, ou PAT sans `write:packages` | `docker login ghcr.io` avec un PAT qui a `write:packages` |
 | Le VPS ne peut pas tirer l'image | serveur non authentifié au registre | `docker login ghcr.io` sur le VPS |
 | Build très long | `GIT_DEPTH=0` | repasser à `GIT_DEPTH=1` |

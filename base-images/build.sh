@@ -18,6 +18,8 @@
 #      --platform ...            ex. linux/amd64,linux/arm64 (implique --push)
 #      --odoo-subdir <chemin>    si la racine d'Odoo est dans un sous-dossier
 #      --enterprise-subdir <ch.> idem pour les modules Enterprise
+#      --odoo-branch <branche>   si la branche ne porte pas le nom de la version
+#      --enterprise-branch <br.> idem pour le dépôt Enterprise
 #      --probe                   ne construit rien : affiche l'arborescence des
 #                                dépôts pour diagnostiquer une détection ratée
 #
@@ -43,9 +45,9 @@ if [ ! -f "${CONF}" ]; then
 # Compte ou organisation GitHub qui héberge tes dépôts privés
 GITHUB_OWNER=odooAfia
 
-# Noms des dépôts (une branche par version : 17.0, 18.0, 19.0…)
+# Noms EXACTS des dépôts GitHub (attention à l'orthographe : entreprise/enterprise)
 ODOO_REPO=odoo
-ENTERPRISE_REPO=enterprise
+ENTERPRISE_REPO=entreprise
 
 # Registre de destination des images de base
 #   GitHub Container Registry : ghcr.io/<owner>
@@ -71,7 +73,8 @@ set -a; source "${CONF}"; set +a
 
 : "${GITHUB_OWNER:?GITHUB_OWNER manquant dans base.env}"
 : "${REGISTRY:?REGISTRY manquant dans base.env}"
-: "${GITHUB_TOKEN:?GITHUB_TOKEN manquant dans base.env}"
+: "${GITHUB_TOKEN:=}"
+[ -n "${GITHUB_TOKEN}" ] || warn "GITHUB_TOKEN vide : clone anonyme (ne marche que sur des dépôts publics)"
 ODOO_REPO="${ODOO_REPO:-odoo}"
 ENTERPRISE_REPO="${ENTERPRISE_REPO:-enterprise}"
 IMAGE_NAME="${IMAGE_NAME:-odoo}"
@@ -84,6 +87,7 @@ case "${1:-}" in enterprise|community) EDITION="$1"; shift ;; esac
 
 PUSH=0; NO_CACHE=""; PLATFORM=""; PYTHON_VERSION=""
 ODOO_SUBDIR=""; ENTERPRISE_SUBDIR=""; PROBE=0
+ODOO_BRANCH_OPT=""; ENTERPRISE_BRANCH_OPT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --push)     PUSH=1; shift ;;
@@ -92,6 +96,8 @@ while [ "$#" -gt 0 ]; do
     --platform) PLATFORM="$2"; PUSH=1; shift 2 ;;
     --odoo-subdir)       ODOO_SUBDIR="$2"; shift 2 ;;
     --enterprise-subdir) ENTERPRISE_SUBDIR="$2"; shift 2 ;;
+    --odoo-branch)       ODOO_BRANCH_OPT="$2"; shift 2 ;;
+    --enterprise-branch) ENTERPRISE_BRANCH_OPT="$2"; shift 2 ;;
     --probe)    PROBE=1; shift ;;
     *) die "option inconnue : $1" ;;
   esac
@@ -128,6 +134,8 @@ build_one() {
     --file "${BASE_DIR}/Dockerfile"
     --build-arg "GITHUB_OWNER=${GITHUB_OWNER}"
     --build-arg "ODOO_SUBDIR=${ODOO_SUBDIR}"
+    --build-arg "ODOO_BRANCH=${ODOO_BRANCH_OPT:-${version}}"
+    --build-arg "ENTERPRISE_BRANCH=${ENTERPRISE_BRANCH_OPT:-${version}}"
     --build-arg "ENTERPRISE_SUBDIR=${ENTERPRISE_SUBDIR}"
     --build-arg "ODOO_REPO=${ODOO_REPO}"
     --build-arg "ENTERPRISE_REPO=${ENTERPRISE_REPO}"
@@ -156,41 +164,101 @@ build_one() {
 }
 
 # ------------------------------------------------------------------- probe
+repo_url() {
+  if [ -n "${GITHUB_TOKEN}" ]; then
+    printf 'https://x-access-token:%s@github.com/%s/%s.git' "${GITHUB_TOKEN}" "${GITHUB_OWNER}" "$1"
+  else
+    printf 'https://github.com/%s/%s.git' "${GITHUB_OWNER}" "$1"
+  fi
+}
+mask() { sed "s|${GITHUB_TOKEN:-@@nope@@}|***|g"; }
+
+probe_repo() {
+  local repo="$1" branch="$2" kind="$3"
+  printf "\n${C_BOLD}%s${C_OFF} — dépôt ${C_BLU}%s/%s${C_OFF}, branche ${C_BLU}%s${C_OFF}\n" \
+         "${kind}" "${GITHUB_OWNER}" "${repo}" "${branch}"
+
+  # 1. le dépôt est-il joignable ?
+  if ! git ls-remote --heads "$(repo_url "${repo}")" >/tmp/heads.txt 2>/tmp/lsr.err; then
+    err "dépôt injoignable"
+    printf "  sortie de git :\n"; mask < /tmp/lsr.err | sed 's/^/    /'
+    cat <<EOF
+  Pistes :
+    · nom du dépôt exact ? (attention : « entreprise » ≠ « enterprise »)
+    · dépôt privé et token sans accès ? -> le PAT fine-grained doit lister CE dépôt
+    · token expiré ou révoqué ?
+EOF
+    return 1
+  fi
+  ok "dépôt joignable"
+
+  # 2. la branche existe-t-elle ?
+  printf "  branches disponibles :\n"
+  sed 's|.*refs/heads/|    - |' /tmp/heads.txt | sort | head -20
+  if ! grep -q "refs/heads/${branch}\$" /tmp/heads.txt; then
+    err "la branche « ${branch} » n'existe PAS dans ce dépôt"
+    printf "  -> relancez avec : --%s-branch <une des branches ci-dessus>\n" \
+           "$([ "${kind}" = "Core Odoo" ] && echo odoo || echo enterprise)"
+    return 1
+  fi
+  ok "branche « ${branch} » présente"
+
+  # 3. structure
+  local dir="${WORK}/${repo}"
+  git clone --depth 1 --branch "${branch}" --single-branch \
+      "$(repo_url "${repo}")" "${dir}" >/dev/null 2>&1 || { err "clone échoué"; return 1; }
+
+  printf "  racine du dépôt :\n"
+  find "${dir}" -maxdepth 1 -not -path '*/.git*' -not -path "${dir}" \
+    | sed "s|${dir}/|    |" | sort | head -20
+
+  printf "  fichiers clés :\n"
+  local found
+  for f in odoo-bin requirements.txt setup.py; do
+    found="$(find "${dir}" -maxdepth 4 -name "${f}" -not -path '*/.git/*' | head -1)"
+    if [ -n "${found}" ]; then
+      printf "    %-18s ${C_GRN}%s${C_OFF}\n" "${f}" "${found#"${dir}"/}"
+    else
+      printf "    %-18s ${C_RED}absent${C_OFF}\n" "${f}"
+    fi
+  done
+  found="$(find "${dir}" -maxdepth 4 -name '__manifest__.py' -not -path '*/.git/*' | head -1)"
+  [ -n "${found}" ] && printf "    %-18s ${C_GRN}%s${C_OFF}\n" "premier module" "$(dirname "${found#"${dir}"/}")"
+
+  # 4. sous-dossier à utiliser
+  local bin sub
+  bin="$(find "${dir}" -maxdepth 4 -name 'odoo-bin' -not -path '*/.git/*' | head -1)"
+  if [ -n "${bin}" ]; then
+    sub="$(dirname "${bin#"${dir}"/}")"
+    [ "${sub}" = "." ] && info "racine Odoo : à la racine du dépôt (détection automatique OK)" \
+                       || info "racine Odoo : sous-dossier « ${sub} » (détection automatique OK)"
+  elif [ "${kind}" != "Core Odoo" ]; then
+    found="$(find "${dir}" -maxdepth 4 -name '__manifest__.py' -not -path '*/.git/*' | head -1)"
+    if [ -n "${found}" ]; then
+      sub="$(dirname "$(dirname "${found#"${dir}"/}")")"
+      info "racine Enterprise : « ${sub:-.} » (détection automatique OK)"
+    fi
+  fi
+  return 0
+}
+
 if [ "${PROBE}" -eq 1 ]; then
   title "Sondage des dépôts — Odoo ${VERSION} (${EDITION})"
   WORK="$(mktemp -d)"
   trap 'rm -rf "${WORK}"' EXIT
-  for repo in "${ODOO_REPO}" "${ENTERPRISE_REPO}"; do
-    [ "${EDITION}" = "community" ] && [ "${repo}" = "${ENTERPRISE_REPO}" ] && continue
-    info "clone ${GITHUB_OWNER}/${repo} @ ${VERSION} …"
-    if git clone --depth 1 --branch "${VERSION}" --single-branch \
-         "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${repo}.git" \
-         "${WORK}/${repo}" >/dev/null 2>&1; then
-      ok "cloné"
-      printf "\n  Arborescence (2 niveaux) :\n"
-      find "${WORK}/${repo}" -maxdepth 2 -not -path '*/.git*' \
-        | sed "s|${WORK}/${repo}|  .|" | sort | head -40
-      printf "\n  Fichiers clés :\n"
-      for f in odoo-bin requirements.txt setup.py; do
-        found="$(find "${WORK}/${repo}" -maxdepth 4 -name "${f}" -not -path '*/.git/*' | head -1)"
-        [ -n "${found}" ] && printf "    %-18s -> %s\n" "${f}" "${found#${WORK}/${repo}/}" \
-                          || printf "    %-18s -> ${C_RED}absent${C_OFF}\n" "${f}"
-      done
-      man="$(find "${WORK}/${repo}" -maxdepth 3 -name '__manifest__.py' -not -path '*/.git/*' | head -1)"
-      [ -n "${man}" ] && printf "    %-18s -> %s\n" "premier module" "$(dirname "${man#${WORK}/${repo}/}")"
-      printf "\n"
-    else
-      err "clone impossible (dépôt, branche ${VERSION} ou droits du token)"
-    fi
-  done
-  cat <<EOF
-Si « odoo-bin » n'est PAS à la racine, relancez le build avec :
-
-    ./base-images/build.sh ${VERSION} ${EDITION} --odoo-subdir <chemin affiché ci-dessus>
-
-Idem avec --enterprise-subdir si les modules Enterprise sont dans un sous-dossier.
-EOF
-  exit 0
+  RC=0
+  probe_repo "${ODOO_REPO}" "${ODOO_BRANCH_OPT:-${VERSION}}" "Core Odoo" || RC=1
+  if [ "${EDITION}" = "enterprise" ]; then
+    probe_repo "${ENTERPRISE_REPO}" "${ENTERPRISE_BRANCH_OPT:-${VERSION}}" "Enterprise" || RC=1
+  fi
+  printf "\n"
+  if [ "${RC}" -eq 0 ]; then
+    ok "les deux dépôts sont exploitables — vous pouvez lancer le build :"
+    printf "    ./base-images/build.sh %s %s --push\n\n" "${VERSION}" "${EDITION}"
+  else
+    err "corrigez les points ci-dessus (base-images/base.env, ou options --*-branch / --*-subdir)"
+  fi
+  exit "${RC}"
 fi
 
 # --------------------------------------------------------------- login registre
