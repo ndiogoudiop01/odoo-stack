@@ -333,6 +333,9 @@ GitHub → votre profil → **Packages** → `odoo` → *Package settings* →
 
 ### D. Se passer complètement de registre
 
+> Runbook complet de ce mode, de zéro à l'instance en ligne :
+> **[`ENTERPRISE-COOLIFY.md`](ENTERPRISE-COOLIFY.md)**.
+
 Si vous n'avez qu'un seul VPS, construisez l'image **sur** le VPS et sautez le
 push :
 

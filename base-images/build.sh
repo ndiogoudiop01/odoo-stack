@@ -23,6 +23,8 @@
 #      --probe                   ne construit rien : affiche l'arborescence des
 #                                dépôts pour diagnostiquer une détection ratée
 #      --anonymous               ignore le token (dépôts publics)
+#      --local                   image construite sur CE serveur, sans registre
+#                                (mode explicite : c'est le défaut sans --push)
 #
 #  Configuration : base-images/base.env  (créé au premier lancement)
 ###############################################################################
@@ -125,7 +127,7 @@ case "${1:-}" in enterprise|community) EDITION="$1"; shift ;; esac
 
 PUSH=0; NO_CACHE=""; PLATFORM=""; PYTHON_VERSION=""
 ODOO_SUBDIR=""; ENTERPRISE_SUBDIR=""; PROBE=0
-ODOO_BRANCH_OPT=""; ENTERPRISE_BRANCH_OPT=""
+ODOO_BRANCH_OPT=""; ENTERPRISE_BRANCH_OPT=""; LOCAL=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --push)     PUSH=1; shift ;;
@@ -138,6 +140,7 @@ while [ "$#" -gt 0 ]; do
     --enterprise-branch) ENTERPRISE_BRANCH_OPT="$2"; shift 2 ;;
     --probe)    PROBE=1; shift ;;
     --anonymous) GITHUB_TOKEN=""; shift ;;
+    --local)     PUSH=0; LOCAL=1; shift ;;
     *) die "option inconnue : $1" ;;
   esac
 done
@@ -453,13 +456,39 @@ fi
 
 printf "\n"
 ok "terminé"
-cat <<EOF
 
-À utiliser dans un client (fichier .env) :
+IMG="${REGISTRY}/${IMAGE_NAME}:${VERSION}-${EDITION}"
 
-    ODOO_BASE_IMAGE=${REGISTRY}/${IMAGE_NAME}:${VERSION}-${EDITION}
+if [ "${PUSH}" -eq 1 ]; then
+  cat <<EOF
 
-Si le VPS doit tirer l'image depuis un registre privé, connectez-le une fois :
+Image publiée : ${IMG}
 
-    docker login ghcr.io -u ${GITHUB_OWNER}
+Suite :
+  1. Autoriser chaque serveur à la tirer (une fois) :
+         docker login ${REGISTRY%%/*} -u ${REGISTRY_USER}
+  2. Créer un client :
+         ./new-client.sh --name "<Client>" --version ${VERSION} \\
+             --edition ${EDITION} --domain erp.client.sn --platform coolify
 EOF
+else
+  cat <<EOF
+
+Image construite LOCALEMENT sur ce serveur (aucun registre) :
+    ${IMG}
+
+C'est suffisant si vous déployez sur CE serveur : Coolify et Dokploy utilisent
+le même démon Docker et la trouveront en \`FROM\`.
+
+Suite :
+  1. Créer un client :
+         ./new-client.sh --name "<Client>" --version ${VERSION} \\
+             --edition ${EDITION} --domain erp.client.sn --platform coolify
+  2. Dans son .env / ses variables Coolify :
+         ODOO_BASE_IMAGE=${IMG}
+
+  ATTENTION : ne cochez PAS « pull latest images » au déploiement, l'image
+  n'existe dans aucun registre. Pour la partager entre plusieurs serveurs,
+  relancez avec --push (voir docs/BASE-IMAGES.md §5).
+EOF
+fi

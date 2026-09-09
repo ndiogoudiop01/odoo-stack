@@ -149,6 +149,7 @@ Débogage pas-à-pas : `make debug` puis **F5** dans VSCode.
 |---|---|
 | Dokploy | **[`docs/DOKPLOY.md`](docs/DOKPLOY.md)** |
 | Coolify | **[`docs/COOLIFY.md`](docs/COOLIFY.md)** |
+| **Enterprise sur Coolify, de zéro** | **[`docs/ENTERPRISE-COOLIFY.md`](docs/ENTERPRISE-COOLIFY.md)** — runbook complet, sans registre |
 
 Résumé : pousser le dépôt du client → créer une ressource **Docker Compose**
 dessus → coller `DEPLOY-ENV.txt` → pointer le DNS → *Deploy*.
