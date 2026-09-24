@@ -120,16 +120,20 @@ services:
 
   # --------------------------------------------------------------- Proxy nginx
   #  Seul service exposé. Aiguille /websocket vers le port 8072 d'Odoo.
+  #  La conf nginx est construite DANS l'image (voir nginx/Dockerfile) : un
+  #  bind-mount « ./nginx/... » casse sur Coolify/Dokploy, qui lancent compose
+  #  depuis un répertoire différent de celui du dépôt cloné.
   proxy:
-    image: nginx:1.27-alpine
+    build:
+      context: ./nginx
+    image: ${CLIENT_SLUG:-odoo}-proxy:${ODOO_VERSION:-19.0}
+    pull_policy: build
     <<: *default-restart
     logging: *default-logging
     depends_on:
       - odoo
     environment:
       TZ: ${TZ:-Africa/Dakar}
-    volumes:
-      - ./nginx/odoo.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/_health || exit 1"]
       interval: 30s
@@ -155,8 +159,14 @@ services:
     networks: [internal, traefik]
 
   # ------------------------------------------------------------ Sauvegardes
+  #  Idem : les scripts sont dans l'image (scripts/Dockerfile), pas montés.
   backup:
-    image: postgres:${POSTGRES_VERSION:-16}-alpine
+    build:
+      context: ./scripts
+      args:
+        POSTGRES_VERSION: ${POSTGRES_VERSION:-16}
+    image: ${CLIENT_SLUG:-odoo}-backup:${ODOO_VERSION:-19.0}
+    pull_policy: build
     <<: *default-restart
     logging: *default-logging
     depends_on:
@@ -176,8 +186,6 @@ services:
     volumes:
       - backups:/backups
       - odoo-data:/filestore        # lecture pour le backup, écriture pour le restore
-      - ./scripts:/scripts:ro
-    entrypoint: ["/bin/sh", "/scripts/backup-cron.sh"]
     labels:
       - "traefik.enable=false"
     networks: [internal]

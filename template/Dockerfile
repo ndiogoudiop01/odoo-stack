@@ -9,7 +9,12 @@
 #  Ici on n'ajoute que ce qui appartient au client : ses dépendances Python,
 #  ses modules, sa configuration. Build : ~30 secondes.
 ###############################################################################
-ARG ODOO_BASE_IMAGE=ghcr.io/odooafia/odoo:19.0-enterprise
+# Pas de valeur par défaut utilisable : ce Dockerfile n'est JAMAIS construit seul.
+# Il l'est par docker-compose.yml, qui passe ODOO_BASE_IMAGE depuis le .env (ou
+# depuis les variables de Coolify/Dokploy). Si vous voyez ce nom dans une erreur,
+# c'est que la ressource a été créée en type « Dockerfile » au lieu de
+# « Docker Compose » — voir docs/COOLIFY.md.
+ARG ODOO_BASE_IMAGE=DEFINISSEZ-ODOO_BASE_IMAGE-DANS-LES-VARIABLES
 FROM ${ODOO_BASE_IMAGE}
 
 USER root
