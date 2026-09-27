@@ -14,4 +14,9 @@ FROM nginx:1.27-alpine
 
 COPY odoo.conf /etc/nginx/conf.d/default.conf
 
-RUN nginx -t -c /etc/nginx/nginx.conf
+#  Pas de « RUN nginx -t » ici : la configuration déclare
+#      upstream odoo { server odoo:8069; }
+#  et nginx résout les noms d'hôte des upstreams dès le contrôle de syntaxe.
+#  Au build, le service « odoo » n'existe pas encore -> « host not found in
+#  upstream », et le build échouerait sur une configuration pourtant valide.
+#  La vérification a lieu au démarrage du conteneur, quand le réseau existe.

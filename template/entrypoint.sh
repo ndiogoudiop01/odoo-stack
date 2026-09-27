@@ -94,7 +94,11 @@ export ADDONS_PATH
 # ------------------------------------------------------- 2. attente PostgreSQL
 log "attente de PostgreSQL sur ${DB_HOST}:${DB_PORT} ..."
 for i in $(seq 1 60); do
-  if PGPASSWORD="${DB_PASSWORD}" pg_isready -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -q; then
+  # -d postgres : sans base explicite, libpq utilise le nom d'UTILISATEUR comme
+  # nom de base. La sonde réussit quand même, mais PostgreSQL journalise
+  # « FATAL: database "odoo" does not exist » à chaque appel — bruit inutile.
+  if PGPASSWORD="${DB_PASSWORD}" pg_isready -h "${DB_HOST}" -p "${DB_PORT}" \
+       -U "${DB_USER}" -d postgres -q; then
     log "PostgreSQL est prêt (tentative ${i})"
     break
   fi

@@ -24,8 +24,11 @@ if [ "${HTTP_OK}" -ne 1 ]; then
 fi
 
 # 2) PostgreSQL --------------------------------------------------------------
+# -d postgres : évite « FATAL: database "<user>" does not exist » dans le
+# journal de PostgreSQL à chaque passage de la sonde.
 if ! PGPASSWORD="${DB_PASSWORD:-}" pg_isready \
-      -h "${DB_HOST:-db}" -p "${DB_PORT:-5432}" -U "${DB_USER:-odoo}" -q; then
+      -h "${DB_HOST:-db}" -p "${DB_PORT:-5432}" -U "${DB_USER:-odoo}" \
+      -d postgres -q; then
   echo "unhealthy: PostgreSQL injoignable" >&2
   exit 1
 fi

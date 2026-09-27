@@ -48,6 +48,13 @@ list: ## Liste tous les clients et leurs ports
 doctor: ## Vérifie l'environnement et la cohérence du parc
 	@./bin/doctor.sh
 
+sync: ## Remet un client au niveau du template : make sync c=acme [dry=1]
+	@[ -n "$(c)" ] || { printf "$(RED)Usage : make sync c=<slug> [dry=1]$(NC)\n"; exit 1; }
+	@./bin/sync-client.sh $(c) $(if $(dry),--dry-run,)
+
+sync-all: ## Remet TOUS les clients au niveau du template [dry=1]
+	@./bin/sync-client.sh --all $(if $(dry),--dry-run,)
+
 module: ## Nouveau module Odoo : make module c=acme m=acme_ventes
 	@[ -n "$(c)" ] && [ -n "$(m)" ] || { printf "$(RED)Usage : make module c=<slug> m=<module>$(NC)\n"; exit 1; }
 	@./bin/new-module.sh $(c) $(m) "$(t)"
